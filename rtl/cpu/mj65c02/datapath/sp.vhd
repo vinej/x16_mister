@@ -1,0 +1,55 @@
+library ieee;
+use ieee.std_logic_1164.all;
+-- jyv 2026-07-11: was ieee.numeric_std_unsigned (VHDL-2008) -- Quartus
+-- Standard's ieee library does not ship that package (Error 10481).  The
+-- Synopsys std_logic_unsigned covers every use here (slv arithmetic and
+-- slv/integer comparison); to_integer calls were made conv_integer.
+use ieee.std_logic_unsigned.all;
+
+entity sp is
+   port (
+      clk_i    : in  std_logic;
+      ce_i     : in  std_logic;
+      wait_i   : in  std_logic;
+      sp_sel_i : in  std_logic_vector(1 downto 0);
+      xr_i     : in  std_logic_vector(7 downto 0);
+
+      sp_o     : out std_logic_vector(7 downto 0)
+   );
+end entity sp;
+
+architecture structural of sp is
+
+   constant SP_NOP : std_logic_vector(1 downto 0) := B"00";
+   constant SP_INC : std_logic_vector(1 downto 0) := B"01";
+   constant SP_DEC : std_logic_vector(1 downto 0) := B"10";
+   constant SP_XR  : std_logic_vector(1 downto 0) := B"11";
+
+   -- Stack pointer
+   signal sp : std_logic_vector(7 downto 0) := X"FF";
+
+begin
+
+   -- Stack Pointer
+   sp_proc : process (clk_i)
+   begin
+      if rising_edge(clk_i) then
+         if ce_i = '1' then
+            if wait_i = '0' then
+               case sp_sel_i is
+                  when SP_NOP => null;
+                  when SP_INC => sp <= sp + 1;
+                  when SP_DEC => sp <= sp - 1;
+                  when SP_XR  => sp <= xr_i;
+                  when others => null;
+               end case;
+            end if;
+         end if;
+      end if;
+   end process sp_proc;
+
+   -- Drive output signal
+   sp_o <= sp;
+
+end architecture structural;
+

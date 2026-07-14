@@ -1,0 +1,44 @@
+# vsim -c -do "run -all; quit -f" tb_native -gSTALL_ON=1 -gHEXFILE=irqdef.hex 
+# Start time: 21:18:03 on Jul 05,2026
+# Loading sv_std.std
+# Loading work.tb_native
+# Loading std.standard
+# Loading std.textio(body)
+# Loading ieee.std_logic_1164(body)
+# Loading ieee.numeric_std(body)
+# Loading work.p65816_pkg(body)
+# Loading work.p65c816_wrap(rtl)
+# Loading work.p65c816(rtl)
+# Loading work.mcode(rtl)
+# Loading work.addrgen(rtl)
+# Loading work.alu(rtl)
+# Loading work.addsubbcd(rtl)
+# Loading work.bcdadder(rtl)
+# Loading work.adder4(rtl)
+# Loading work.bit_adder(rtl)
+# ** Warning: (vsim-8822) tb_native.v(83): [TFMPC] - Missing Verilog connection for formal VHDL port 'emu_mode'.
+#    Time: 0 ps  Iteration: 0  Instance: /tb_native/dut File: C:/quartus/projects/x16_mister/rtl/cpu/65C816_x16/p65c816_wrap.vhd
+# ** Warning: (vsim-8822) tb_native.v(83): [TFMPC] - Missing Verilog connection for formal VHDL port 'i_flag'.
+#    Time: 0 ps  Iteration: 0  Instance: /tb_native/dut File: C:/quartus/projects/x16_mister/rtl/cpu/65C816_x16/p65c816_wrap.vhd
+# run -all
+# ** Warning: NUMERIC_STD.TO_INTEGER: metavalue detected, returning 0
+#    Time: 0 ps  Iteration: 0  Instance: /tb_native/dut/u_cpu/MCode
+# ** Warning: NUMERIC_STD."=": metavalue detected, returning FALSE
+#    Time: 0 ps  Iteration: 0  Instance: /tb_native/dut/u_cpu
+# ** Warning: NUMERIC_STD."/=": metavalue detected, returning TRUE
+#    Time: 0 ps  Iteration: 0  Instance: /tb_native/dut/u_cpu
+# [TB] P65C816 NATIVE trampoline + stalls: STALL_ON=1 IRQ_PERIOD=3000
+# [NIRQ 1] t=55515000 stack=01fc cnt=00 minstk=01fc
+# [NIRQ 2] t=95265000 stack=01fc cnt=01 minstk=01e6
+# [NIRQ 3] t=134905000 stack=01fc cnt=02 minstk=01e6
+# [NIRQ 4] t=175095000 stack=01fc cnt=03 minstk=01e6
+# [NIRQ 5] t=216125000 stack=01fc cnt=04 minstk=01e6
+# [NIRQ 6] t=257185000 stack=01fc cnt=05 minstk=01e6
+# [NIRQ 7] t=297105000 stack=01fc cnt=06 minstk=01e6
+# [NIRQ 8] t=337165000 stack=01fc cnt=07 minstk=01e6
+# [NIRQ 20] t=815415000 stack=01fc cnt=13 minstk=01e6
+# [TB] done. native IRQs=29  emu-vector fetches=0  evec=00  cnt=1d  hookd=00  min stack=01e6                             clean
+# ** Note: $finish    : tb_native.v(127)
+#    Time: 1215195 ns  Iteration: 1  Instance: /tb_native
+# End time: 21:18:04 on Jul 05,2026, Elapsed time: 0:00:01
+# Errors: 0, Warnings: 5

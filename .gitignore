@@ -1,0 +1,52 @@
+db
+greybox_tmp
+incremental_db
+output_files
+simulation
+hc_output
+scaler
+hps_isw_handoff
+vip
+*.img
+*_sim
+.qsys_edit
+PLLJ_PLLSPE_INFO.txt
+*.bak
+*.orig
+*.rej
+*.qdf
+*.rpt
+*.smsg
+*.summary
+*.done
+*.jdi
+*.pin
+*.sof
+*.qws
+*.ppf
+*.ddb
+build_id.v
+c5_pin_model_dump.txt
+*.sopcinfo
+*.csv
+*.f
+*.cmp
+*.sip
+*.spd
+*.bsf
+*~
+*.xml
+*_netlist
+*.cdf
+
+# local test assets (huge / user-specific)
+rom/x16_rc3.img
+rom/R49.BIN
+
+# copyrighted X16 ROM -- NEVER commit; users bring their own boot1.rom at
+# runtime (see README "Rebuilding rom.hex").
+rom/rom.hex
+rom/rom.bin
+rom/rom.bin_FROM_SOURCE
+# release archives are attached to GitHub Releases, not the source tree
+rom/*.zip

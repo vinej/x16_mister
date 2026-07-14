@@ -1,0 +1,11 @@
+# jyv 2026-07-07: minimal version-portable QIP for the X16 core PLL.
+# Replaces both the stale 17.0 rtl/pll (wrong frequencies, missing
+# pll_0002.v -> "pll_0002 is missing" on community Quartus 17.0 builds)
+# and the 24.1-generated root pll.qip (metadata Quartus 17 can't parse).
+set_global_assignment -entity "pll" -library "pll" -name IP_TOOL_NAME "altera_pll"
+set_global_assignment -entity "pll" -library "pll" -name IP_TOOL_VERSION "17.0"
+set_global_assignment -entity "pll" -library "pll" -name IP_TARGETED_DEVICE_FAMILY "Cyclone V"
+set_global_assignment -entity "pll" -library "pll" -name IP_GENERATED_DEVICE_FAMILY "{Cyclone V}"
+set_global_assignment -name SYNTHESIS_ONLY_QIP ON
+set_global_assignment -library "pll" -name VERILOG_FILE [file join $::quartus(qip_path) "pll.v"]
+set_global_assignment -library "pll" -name VERILOG_FILE [file join $::quartus(qip_path) "pll/pll_0002.v"]
