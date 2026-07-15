@@ -245,9 +245,7 @@ module emu
     // Deselected-until-mounted, the pre-mount probe just times out cleanly
     // (miso = 0xFF = "no card"), state stays IDLE, and the ROM's per-access
     // CMD13 alive-check re-inits the card once the image appears.
-    reg vsd_sel = 0;
-    always @(posedge sdram_clk) if (img_mounted[0]) vsd_sel <= |img_size;
-
+    //
     // sd_card lives in the 100 MHz domain with hps_io (BUG3 final fix).
     // jyv 2026-07-07 (SD-speed saga, act 3): the SPI master moved into the
     // SAME 100 MHz domain (rtl/spi_sd_master100.sv, sck = 12.5 MHz = real
@@ -256,6 +254,28 @@ module emu
     // reset is synced into the domain.
     reg [1:0] hs_rst_sync;
     always @(posedge sdram_clk) hs_rst_sync <= {hs_rst_sync[0], ~cpu_reset_n};
+
+    // jyv 2026-07-15 (RELAUNCH wedge, tester report): SC0 is an AUTO-REMOUNT
+    // slot -- on a core relaunch Main re-announces the image BEFORE the CPU
+    // boots, so vsd_sel was already 1 when the boot probe ran and the gate
+    // above no longer protected it: the probe's abandoned CMD17 wedged
+    // read_state exactly as described -- locked boot / garbage first read,
+    // "fixed" by remount or CPU-toggle (any reset with the mount settled).
+    // FIX: force the card DESELECTED for ~1.3 s after EVERY reset release
+    // (vsd_hold), so the boot probe always sees "no card" -- byte-for-byte
+    // the HW-proven first-launch path.  DOS"$/F7 comes seconds later, long
+    // after the hold expires.  Every reset re-runs the ROM's boot probe
+    // (framework, CPU-toggle, SMC, Load ROM), so the hold re-arms on all of
+    // them via hs_rst_sync.  Reproduced + fix proven in sim/tb_relaunch.v
+    // (run.sh relaunch: FIX=0 wedges/corrupts, FIX=4 reads clean).
+    reg        vsd_mnt = 0;
+    reg [26:0] vsd_hold = '1;              // 2^27-1 @ 100 MHz = ~1.34 s
+    always @(posedge sdram_clk) begin
+        if (img_mounted[0]) vsd_mnt <= |img_size;
+        if (hs_rst_sync[1])       vsd_hold <= '1;   // re-arm on every core reset
+        else if (vsd_hold != 0)   vsd_hold <= vsd_hold - 1'd1;
+    end
+    wire vsd_sel = vsd_mnt & (vsd_hold == 0);
     // memory-side reset in the sdram domain: stays RELEASED through ROM/cart
     // download holds and the cart-restore hold -- the nvram/cart backers run
     // on this (a sys_rst_n-derived reset would deadlock the restore hold,

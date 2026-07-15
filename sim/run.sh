@@ -297,6 +297,23 @@ case "${1:-both}" in
       vsim -c -gGATE_SS=$G -do "run -all; quit -f" tb_wedge 2>&1 | grep -E "CFG|R1=|450/510/511|READ OK|READ FAIL|TIMEOUT"
     done
     exit 0 ;;
+  relaunch)
+    # RELAUNCH SD wedge (2026-07-15 tester bug): SC0 auto-remount pre-sets
+    # vsd_sel=1 BEFORE the ROM boot probe -> the probe's abandoned CMD17 hits a
+    # selected sd_card -> read_state wedges (WAIT_IO) -> later commands are
+    # REJECTED -> locked boot / garbage first read.  FIX=4 = the shipped fix
+    # (x16.sv vsd_hold): card DESELECTED for a boot-hold after every reset, so
+    # the probe sees "no card" -- the HW-proven first-launch path.
+    #   FIX=1 documents the rejected naive fix (vsd_sel low only during the
+    #   reset pulse -- probe runs after release, still wedges).
+    # Expect: FIX=0 -> READ FAILED (wedge or garbage lba0);  FIX=4 -> READ OK.
+    vlog -quiet -sv ../rtl/spi_sd_master.sv sd_card_sim.sv tb_relaunch.v
+    for F in 0 4; do
+      echo "----- FIX=$F -----"
+      vsim -c -gFIX=$F -gMHALF=0 -gHPS_READY_LAG=250000 -gBOOT_HOLD=5000000 -gWATCHDOG=120000000 \
+           -do "run -all; quit -f" tb_relaunch 2>&1 | grep -E "CFG|res_n released|boot probe done|F7 typed|READ OK|READ FAIL|TIMEOUT|WEDGE"
+    done
+    exit 0 ;;
   sweep)
     for AD in 0 1 2 4 8; do
       echo "----- ACK_DROP=$AD -----"
