@@ -2,6 +2,14 @@
 
 Note: 128M SDRAM module is needed for the X16 core.
 
+## version 1.2 :
+
+Add serial card emulation done by jnngill
+
+## version 1.1 :
+
+Fixed a lock-up (frozen boot, no flashing prompt) when relaunching the core with an SD image still mounted. The auto-remounted image could collide with the ROM's boot-time SD probe and wedge the virtual SD card; the guest SD is now kept deselected for ~1.3 s after every reset so the probe always runs cleanly. If you were working around this by remounting the image or toggling the CPU after each launch, that is no longer needed.
+
 ## version 1.0 : 
 The published `.rbf` contains **no ROM** — the X16 ROM is not ours to
 redistribute — so you must supply your own `boot1.rom` at runtime.
