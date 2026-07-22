@@ -20,12 +20,11 @@
 // on each toggle, emits the 1-, 2-, or 3-byte sequence above, one byte per
 // cpu_clk cycle with a single-cycle uart_byte_valid pulse per byte.
 //
-// hps_io is clocked by cpu_clk, so ps2_key is already in this domain -- no
-// CDC synchroniser is needed.  Key events from hps_io are milliseconds apart,
-// far slower than the <=3-cycle emission, so the simple "ignore strobe changes
-// while emitting" policy never drops a keystroke: a strobe edge that arrives
-// mid-emission is still pending (last_strobe is only updated on accept) and is
-// picked up the cycle the FSM returns to idle.
+// hps_io runs in the 100 MHz system domain; x16.sv synchronizes its held event
+// word into cpu_clk.  Capture every observed toggle into a small queue before
+// serializing it.  Without this queue, two toggles while a key/mouse packet was
+// being emitted could return the strobe to its previous level and lose both
+// events.
 //============================================================================
 // MOUSE (2026-07-05, wheel added 2026-07-07): hps_io's ps2_mouse[24:0] is
 // forwarded as the SMC injection protocol's 5-byte packet
@@ -91,6 +90,16 @@ module ps2_to_smc_bridge #(
     logic [2:0] idx;
     logic       last_strobe, last_mstrobe;
 
+    // Decouple toggle capture from byte emission.  Eight entries comfortably
+    // cover MiSTer modifier/key bursts while the serializer drains at up to
+    // three clocks per keyboard event.
+    logic [9:0] key_fifo [0:7];             // {pressed, extended, code}
+    logic [2:0] key_rd_ptr, key_wr_ptr;
+    logic [3:0] key_count;
+    wire        key_arrive = (ps2_key[10] != last_strobe);
+    wire        key_push   = key_arrive && (key_count != 4'd8);
+    wire        key_pop    = (state == S_IDLE) && (key_count != 4'd0);
+
     // Typematic: last held make (retargeted by any newer make, cleared by
     // its own break) and the delay/rate countdown.
     logic        tpm_valid;
@@ -121,6 +130,9 @@ module ps2_to_smc_bridge #(
             idx             <= 2'd0;
             last_strobe     <= 1'b0;
             last_mstrobe    <= 1'b0;
+            key_rd_ptr      <= 3'd0;
+            key_wr_ptr      <= 3'd0;
+            key_count       <= 4'd0;
             ev_ext          <= 1'b0;
             ev_pressed      <= 1'b0;
             ev_code         <= 8'h00;
@@ -134,26 +146,41 @@ module ps2_to_smc_bridge #(
         end else begin
             uart_byte_valid <= 1'b0;   // default: single-cycle pulses only
 
+            // Observe key toggles in every FSM state, including while a mouse
+            // packet or an earlier key sequence is being serialized.
+            if (key_arrive) last_strobe <= ps2_key[10];
+            if (key_push) begin
+                key_fifo[key_wr_ptr] <= ps2_key[9:0];
+                key_wr_ptr           <= key_wr_ptr + 3'd1;
+            end
+            if (key_pop) key_rd_ptr <= key_rd_ptr + 3'd1;
+            case ({key_push, key_pop})
+                2'b10: key_count <= key_count + 4'd1;
+                2'b01: key_count <= key_count - 4'd1;
+                default: ;
+            endcase
+
             // typematic countdown runs regardless of FSM state
             if (tpm_valid && tpm_cnt != 0) tpm_cnt <= tpm_cnt - 32'd1;
 
             case (state)
                 S_IDLE: begin
-                    if (ps2_key[10] != last_strobe) begin
-                        last_strobe <= ps2_key[10];
-                        ev_ext      <= ps2_key[8];
-                        ev_pressed  <= ps2_key[9];
-                        ev_code     <= ps2_key[7:0];
+                    if (key_count != 0) begin
+                        ev_ext      <= key_fifo[key_rd_ptr][8];
+                        ev_pressed  <= key_fifo[key_rd_ptr][9];
+                        ev_code     <= key_fifo[key_rd_ptr][7:0];
                         idx         <= 3'd0;
                         state       <= S_EMIT;
-                        if (ps2_key[9]) begin
+                        if (key_fifo[key_rd_ptr][9]) begin
                             // make: retarget typematic (except Pause, which
                             // never gets a break from hps_io)
-                            tpm_valid <= ~(ps2_key[8] & (ps2_key[7:0] == 8'h77));
-                            tpm_ext   <= ps2_key[8];
-                            tpm_code  <= ps2_key[7:0];
+                            tpm_valid <= ~(key_fifo[key_rd_ptr][8] &
+                                           (key_fifo[key_rd_ptr][7:0] == 8'h77));
+                            tpm_ext   <= key_fifo[key_rd_ptr][8];
+                            tpm_code  <= key_fifo[key_rd_ptr][7:0];
                             tpm_cnt   <= TPM_DELAY;
-                        end else if (ps2_key[8] == tpm_ext && ps2_key[7:0] == tpm_code) begin
+                        end else if (key_fifo[key_rd_ptr][8] == tpm_ext &&
+                                     key_fifo[key_rd_ptr][7:0] == tpm_code) begin
                             // break of the held key stops its repeat
                             tpm_valid <= 1'b0;
                         end

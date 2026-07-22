@@ -18,6 +18,7 @@ module x16_serial_card
     input  wire       uart_rxd,
     input  wire       uart_cts,
     input  wire       uart_dsr,
+    input  wire       uart_ri,
     output wire       uart_txd,
     output wire       uart_rts,
     output wire       uart_dtr
@@ -45,11 +46,10 @@ module x16_serial_card
     reg [3:0]  msr_delta;
     reg        cts_prev;
     reg        dsr_prev;
+    reg        ri_prev;
     reg        dcd_prev;
 
     reg        rx_meta, rx_sync, rx_prev;
-    reg        cts_meta, cts_sync;
-    reg        dsr_meta, dsr_sync;
 
     reg        tx_busy;
     reg [15:0] tx_ticks;
@@ -70,6 +70,7 @@ module x16_serial_card
 
     wire dlab      = lcr[7];
     wire fifo_en   = fcr[0];
+    wire loopback  = mcr[4];
     wire [3:0] current_data_bits = 4'd5 + {2'b00, lcr[1:0]};
     wire [1:0] current_stop_bits = ((lcr[2]) && (lcr[1:0] == 2'b00)) ? 2'd2 :
                                    ((lcr[2]) ? 2'd2 : 2'd1);
@@ -84,10 +85,10 @@ module x16_serial_card
     // guest core, and ROMTERM may refuse to transmit when it sees CTS low.
     // Treat CTS as asserted so the guest can use the built-in modem path
     // without requiring external hardware flow-control wiring.
-    wire cts_curr = 1'b1;
-    wire dsr_curr = 1'b1;
-    wire ri_curr  = 1'b0;
-    wire dcd_curr = 1'b1;
+    wire cts_curr = loopback ? mcr[1] : 1'b1;
+    wire dsr_curr = loopback ? mcr[0] : 1'b1;
+    wire ri_curr  = loopback ? mcr[2] : uart_ri;
+    wire dcd_curr = loopback ? mcr[3] : 1'b1;
 
     wire [7:0] lsr_value = {
         1'b0,
@@ -110,9 +111,9 @@ module x16_serial_card
 
     wire [7:0] iir_value = fifo_en ? 8'hC1 : 8'h01;
 
-    assign uart_txd = tx_line;
-    assign uart_rts = mcr[1];
-    assign uart_dtr = mcr[0];
+    assign uart_txd = loopback ? 1'b1 : tx_line;
+    assign uart_rts = loopback ? 1'b0 : mcr[1];
+    assign uart_dtr = loopback ? 1'b0 : mcr[0];
 
     function [15:0] bit_ticks;
         input [15:0] div;
@@ -211,7 +212,9 @@ module x16_serial_card
             tx_count       <= 5'd0;
             ier            <= 8'h00;
             fcr            <= 8'h00;
-            lcr            <= 8'h03;
+            // A 16450-compatible UART resets LCR to zero. ROMTERM uses this
+            // reset value as part of its card-presence probe.
+            lcr            <= 8'h00;
             mcr            <= 8'h00;
             scr            <= 8'h00;
             divisor        <= DEFAULT_DIVISOR;
@@ -220,16 +223,13 @@ module x16_serial_card
             lsr_framing    <= 1'b0;
             lsr_break      <= 1'b0;
             msr_delta      <= 4'h0;
-            cts_prev       <= 1'b0;
-            dsr_prev       <= 1'b0;
-            dcd_prev       <= 1'b0;
+            cts_prev       <= 1'b1;
+            dsr_prev       <= 1'b1;
+            ri_prev        <= 1'b0;
+            dcd_prev       <= 1'b1;
             rx_meta        <= 1'b1;
             rx_sync        <= 1'b1;
             rx_prev        <= 1'b1;
-            cts_meta       <= 1'b0;
-            cts_sync       <= 1'b0;
-            dsr_meta       <= 1'b0;
-            dsr_sync       <= 1'b0;
             tx_busy        <= 1'b0;
             tx_ticks       <= 16'd0;
             tx_bits_left   <= 4'd0;
@@ -249,19 +249,19 @@ module x16_serial_card
             rx_meta  <= uart_rxd;
             rx_sync  <= rx_meta;
             rx_prev  <= rx_sync;
-            cts_meta <= uart_cts;
-            cts_sync <= cts_meta;
-            dsr_meta <= uart_dsr;
-            dsr_sync <= dsr_meta;
 
-            if (cts_sync != cts_prev) begin
+            if (cts_curr != cts_prev) begin
                 msr_delta[0] <= 1'b1;
-                cts_prev <= cts_sync;
+                cts_prev <= cts_curr;
             end
-            if (dsr_sync != dsr_prev) begin
+            if (dsr_curr != dsr_prev) begin
                 msr_delta[1] <= 1'b1;
-                dsr_prev <= dsr_sync;
+                dsr_prev <= dsr_curr;
             end
+            if (ri_prev && !ri_curr) begin
+                msr_delta[2] <= 1'b1;
+            end
+            ri_prev <= ri_curr;
             if (dcd_curr != dcd_prev) begin
                 msr_delta[3] <= 1'b1;
                 dcd_prev <= dcd_curr;
@@ -271,6 +271,8 @@ module x16_serial_card
                 case (addr)
                     3'd0: if (dlab) begin
                               divisor[7:0] <= di;
+                          end else if (loopback) begin
+                              push_rx(di);
                           end else if (tx_count != FIFO_DEPTH) begin
                               tx_fifo[tx_wr_ptr] <= di;
                               tx_wr_ptr <= tx_wr_ptr + 4'd1;

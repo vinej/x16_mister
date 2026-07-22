@@ -527,12 +527,9 @@ module emu
     wire via1_cs   = dec_valid & (cpu_a[15:4]  == 12'h9F0);          // $9F00-$9F0F
     wire via2_cs   = dec_valid & (cpu_a[15:4]  == 12'h9F1);          // $9F10-$9F1F
     // TexElec's dual-UART serial/network card defaults to IO7-Low and exposes
-    // two 8-byte UART windows at $9FE0 and $9FE8. MiSTer only gives us one
-    // host UART, so alias both windows onto the same underlying UART block for
-    // ROMTERM compatibility.
-    wire serial0_cs = dec_valid &
-                      ((cpu_a[15:3] == 13'h13FC) ||                 // $9FE0-$9FE7
-                       (cpu_a[15:3] == 13'h13FD));                  // $9FE8-$9FEF
+    // two independent 8-byte UART windows at $9FE0 and $9FE8.
+    wire serial0_cs = dec_valid & (cpu_a[15:3] == 13'h13FC);       // $9FE0-$9FE7
+    wire serial1_cs = dec_valid & (cpu_a[15:3] == 13'h13FD);       // $9FE8-$9FEF
     wire hi_ram_cs = dec_valid & (cpu_a[15:13] == 3'b101);           // $A000-$BFFF
     wire lowram_cs = dec_valid & ~(cpu_a[15:14] == 2'b11)
                    & ~(cpu_a[15:8] == 8'h9F) & ~(cpu_a[15:13] == 3'b101); // $0000-$9EFF
@@ -1299,11 +1296,26 @@ module emu
     // Serial/network card emulation at $9FE0-$9FEF
     //
     // ROMTERM expects the X16 serial/network card default at IO7-Low with
-    // valid UARTs at both $9FE0 and $9FE8. Alias both onto the same MiSTer
-    // host UART so the modem/TCP bridge is reachable regardless of which
-    // detected port ROMTERM selects.
+    // two distinct UARTs at $9FE0 and $9FE8. MiSTer only exposes one host
+    // UART, so both guest UART register banks see the same RX/CTS/DSR inputs
+    // and the last-written guest UART owns TX/RTS/DTR. The physical card does
+    // not cross-connect DTR between UARTs and has no RI input. ROMTERM expects
+    // the companion RI bit to stay low while probing DTR; cross-connecting
+    // these signals rejects the card.
     // ========================================================================
     wire [7:0] serial0_data;
+    wire [7:0] serial1_data;
+    wire serial0_txd, serial0_rts, serial0_dtr;
+    wire serial1_txd, serial1_rts, serial1_dtr;
+    reg serial_uart_sel = 1'b0;
+
+    always @(posedge cpu_clk or negedge cpu_reset_n) begin
+        if (!cpu_reset_n) serial_uart_sel <= 1'b0;
+        else if (cpu_rdy && ~cpu_rwn) begin
+            if (serial0_cs) serial_uart_sel <= 1'b0;
+            if (serial1_cs) serial_uart_sel <= 1'b1;
+        end
+    end
 
     x16_serial_card #(
         .CLK_HZ         (8_000_000),
@@ -1320,10 +1332,36 @@ module emu
         .uart_rxd (UART_RXD),
         .uart_cts (UART_CTS),
         .uart_dsr (UART_DSR),
-        .uart_txd (UART_TXD),
-        .uart_rts (UART_RTS),
-        .uart_dtr (UART_DTR)
+        .uart_ri  (1'b0),
+        .uart_txd (serial0_txd),
+        .uart_rts (serial0_rts),
+        .uart_dtr (serial0_dtr)
     );
+
+    x16_serial_card #(
+        .CLK_HZ         (8_000_000),
+        .DEFAULT_DIVISOR(16'd8)
+    ) u_serial1 (
+        .clk      (cpu_clk),
+        .reset_n  (cpu_reset_n),
+        .cs       (serial1_cs),
+        .rwn      (cpu_rwn),
+        .enable   (cpu_rdy),
+        .addr     (cpu_a[2:0]),
+        .di       (cpu_do),
+        .do_o     (serial1_data),
+        .uart_rxd (UART_RXD),
+        .uart_cts (UART_CTS),
+        .uart_dsr (UART_DSR),
+        .uart_ri  (1'b0),
+        .uart_txd (serial1_txd),
+        .uart_rts (serial1_rts),
+        .uart_dtr (serial1_dtr)
+    );
+
+    assign UART_TXD = serial_uart_sel ? serial1_txd : serial0_txd;
+    assign UART_RTS = serial_uart_sel ? serial1_rts : serial0_rts;
+    assign UART_DTR = serial_uart_sel ? serial1_dtr : serial0_dtr;
 
     // ========================================================================
     // PS/2 keyboard bridge (Phase e):  hps_io ps2_key -> smc_x16 byte stream
@@ -1416,6 +1454,7 @@ module emu
                     via1_cs   ? via1_data    :
                     via2_cs   ? via2_data    :
                     serial0_cs ? serial0_data :
+                    serial1_cs ? serial1_data :
                     lowram_cs ? lowram_data  :
                                 open_bus_r;   // unmapped: floating bus
 
