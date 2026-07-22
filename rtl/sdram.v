@@ -40,6 +40,7 @@ module sdram (
 	input      [24:0] addr,       // 25 bit byte address
 	input      [ 7:0] din,
 	output     [ 7:0]	dout,
+	output     [15:0]	dout16,   // full 16-bit word of the last read (framebuffer tap)
 
 	input 		 		refresh,    // refresh cycle
 	input 		 		ce,         // cpu/chipset access
@@ -116,7 +117,13 @@ assign sd_dqm = sd_addr[12:11];
 reg bt;
 reg [15:0] dout_r;
 
-assign dout = bt ? dout_r[15:8] : dout_r[7:0];
+assign dout   = bt ? dout_r[15:8] : dout_r[7:0];
+// Framebuffer tap: both byte lanes of the last-read word.  On a READ (we=0)
+// dqm=00 so the chip drives all 16 bits and dout_r holds the whole word --
+// bit[24] (bt) only chose which lane `dout` shows.  Two byte addresses A
+// (A24=0) and A|0x1000000 (A24=1) are the low/high bytes of THIS word; the
+// bitmap engine stores even/odd pixels there so one read yields two pixels.
+assign dout16 = dout_r;
 
 always @(posedge clk) begin
 	reg [8:0] caddr;

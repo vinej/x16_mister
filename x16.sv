@@ -129,8 +129,10 @@ module emu
         "-;",
         "O[1],CPU,65C816,65C02;", // status[1] -> cpu02_sel (latched in reset)
         "-;",
+        "O[2],VERA2 Bitmap Layer,Off,On;", // status[2] master-enable: SDRAM 640x480 4/8bpp bitmap ($9F60)
+        "-;",
         "J1,A,B,X,Y,L,R,Select,Start;",  // SNES pad buttons -> joy[4..11]
-        "V,v1.0"
+        "V,v1.3"
     };
 
     wire [127:0] status;
@@ -533,6 +535,7 @@ module emu
     wire serial0_cs = dec_valid &
                       ((cpu_a[15:3] == 13'h13FC) ||                 // $9FE0-$9FE7
                        (cpu_a[15:3] == 13'h13FD));                  // $9FE8-$9FEF
+    wire bmp_cs    = dec_valid & (cpu_a[15:4]  == 12'h9F6);          // $9F60-$9F6F bitmap
     wire hi_ram_cs = dec_valid & (cpu_a[15:13] == 3'b101);           // $A000-$BFFF
     wire lowram_cs = dec_valid & ~(cpu_a[15:14] == 2'b11)
                    & ~(cpu_a[15:8] == 8'h9F) & ~(cpu_a[15:13] == 3'b101); // $0000-$9EFF
@@ -698,13 +701,41 @@ module emu
     // (banks 32-255 -> 0x480000-0x7FFFFF).  cart reads AND writes both go
     // to SDRAM -- the cart space is RAM-semantics (software decides whether
     // a bank holds "ROM" images or data).
-    wire        ext_sdram_cs   = (hi_ram_cs & ~bram_sel) | cart_cs;
-    wire        ext_sdram_we   = ext_sdram_cs & ~cpu_rwn;
-    wire [24:0] ext_sdram_addr = cart_cs
-                               ? {3'b001, rom_bank_r, cpu_a[13:0]}
-                               : {4'd0,   ram_bank_r, cpu_a[12:0]};
+    // ---- bitmap layer interconnect (driven by u_bmp_regs / u_bmp_engine below) ----
+    wire        bmp_master_en = status[2];
+    wire        bmp_sel = bmp_cs & bmp_master_en;   // $9F6x selected AND OSD-enabled
+                                                    // (OSD off -> device inert = stock)
+    wire  [7:0] bmp_do;
+    wire        bmp_enable;
+    wire  [1:0] bmp_mode;
+    wire        bmp_passthru;            // CTRL[3]: VERA opaque pixels over the bitmap
+    wire        bmp_fb_wr, bmp_fb_rd;    // $9F65 write / read cycle (RAW, OSD-gated)
+    wire [24:0] bmp_fb_addr;             // planar byte address for the access
+    wire        bmp_pal_we;
+    wire  [7:0] bmp_pal_idx;
+    wire [11:0] bmp_pal_data;
+    wire        bmp_fb_go,  bmp_fb_valid, bmp_fb_done;
+    wire [23:0] bmp_fb_base;
+    wire [10:0] bmp_fb_len;
+    wire [15:0] bmp_fb_word;
+    wire  [3:0] bmp_r, bmp_g, bmp_b;
+    wire        bmp_active;
+    wire        bmp_blit_start, bmp_blit_done;   // SDRAM->SDRAM save-under copy
+    wire [19:0] bmp_blit_src, bmp_blit_dst, bmp_blit_len;   // 20-bit (1 MB fb space)
 
-    ext_ram_sdram u_hiram (
+    // Framebuffer DATA ($9F65) rides the ext_ram_sdram CPU port at the planar
+    // address: writes through the write FIFO, reads through the read path (which
+    // stalls the CPU for the SDRAM latency, like a HiRAM read -- this is what
+    // makes GUI save-under possible).  bmp_fb_wr/rd are RAW decodes (no cpu_rdy)
+    // so they cannot close a comb loop through `ready`; u_bmp_regs advances the
+    // pointer on the cpu_rdy commit.  Both are OSD-gated via the regs' cs.
+    wire        ext_sdram_cs   = (hi_ram_cs & ~bram_sel) | cart_cs | bmp_fb_wr | bmp_fb_rd;
+    wire        ext_sdram_we   = ext_sdram_cs & ~cpu_rwn;   // read: cpu_rwn=1 -> we=0
+    wire [24:0] ext_sdram_addr = (bmp_fb_wr | bmp_fb_rd) ? bmp_fb_addr
+                               : cart_cs                 ? {3'b001, rom_bank_r, cpu_a[13:0]}
+                               :                           {4'd0,   ram_bank_r, cpu_a[12:0]};
+
+    ext_ram_sdram #(.FB_BASE_WORD(24'h800000)) u_hiram (
         .clk        (cpu_clk),
         .sdram_clk  (sdram_clk),
         .reset_n    (mem_reset_n),           // stays alive during ROM/cart downloads
@@ -726,6 +757,21 @@ module emu
         .bk_ack         (crt_bk_ack),
         .wr_snoop       (crt_wr_snoop),
         .wr_snoop_addr  (crt_wr_snoop_addr),
+
+        // Framebuffer streaming read port -- driven by u_bmp_engine (OSD-gated;
+        // idle when the bitmap layer is disabled -> zero SDRAM impact).
+        .fb_go      (bmp_fb_go),
+        .fb_base    (bmp_fb_base),
+        .fb_len     (bmp_fb_len),
+        .fb_valid   (bmp_fb_valid),
+        .fb_word    (bmp_fb_word),
+        .fb_done    (bmp_fb_done),
+        .blit_start (bmp_blit_start),
+        .blit_src   (bmp_blit_src),
+        .blit_dst   (bmp_blit_dst),
+        .blit_len   (bmp_blit_len),
+        .blit_done  (bmp_blit_done),
+
         .ld_busy    (cart_ld_busy),
         .rd_data    (sdram_rd),
         .ready      (sdram_rdy),
@@ -837,6 +883,7 @@ module emu
     // ----- VERA outputs -----
     wire [3:0] vera_r, vera_g, vera_b;
     wire       vera_hs, vera_vs, vera_de;
+    wire       vera_opaque;          // 1 = VERA drew a sprite/layer pixel here
     wire       vera_audio_lrck, vera_audio_bck, vera_audio_data;
 
     top u_vera (
@@ -855,6 +902,7 @@ module emu
         .vga_hsync       (vera_hs),
         .vga_vsync       (vera_vs),
         .vga_de          (vera_de),
+        .vga_opaque      (vera_opaque),
 
         .spi_sck         (vera_spi_sck),
         .spi_mosi        (vera_spi_mosi),
@@ -1326,6 +1374,61 @@ module emu
     );
 
     // ========================================================================
+    // SDRAM-backed bitmap layer ($9F60-$9F6F).  OSD master-enable = status[2].
+    // Register block (cpu_clk) + scanout engine (pix_clk fill in sdram_clk).
+    // Composited over VERA by the VGA mux below; VERA is untouched.
+    // ========================================================================
+    bitmap_regs u_bmp_regs (
+        .clk          (cpu_clk),
+        .reset_n      (cpu_reset_n),
+        .cs           (bmp_sel),          // OSD-gated: off -> device inert
+        .rwn          (cpu_rwn),
+        .en           (cpu_rdy),
+        .addr         (cpu_a[3:0]),
+        .di           (cpu_do),
+        .do_o         (bmp_do),
+        .master_en    (bmp_master_en),
+        .bmp_enable   (bmp_enable),
+        .bmp_mode     (bmp_mode),
+        .bmp_passthru (bmp_passthru),
+        .fb_wr_sel    (bmp_fb_wr),
+        .fb_rd_sel    (bmp_fb_rd),
+        .fb_addr      (bmp_fb_addr),
+        .pal_we       (bmp_pal_we),
+        .pal_idx      (bmp_pal_idx),
+        .pal_data     (bmp_pal_data),
+        .blit_start   (bmp_blit_start),
+        .blit_src     (bmp_blit_src),
+        .blit_dst     (bmp_blit_dst),
+        .blit_len     (bmp_blit_len),
+        .blit_done    (bmp_blit_done)
+    );
+
+    bitmap_engine u_bmp_engine (
+        .pix_clk    (pix_clk),
+        .reset_n    (sys_rst_n),
+        .enable     (bmp_enable),
+        .mode       (bmp_mode),
+        .de         (vera_de),
+        .vs         (vera_vs),
+        .bmp_r      (bmp_r),
+        .bmp_g      (bmp_g),
+        .bmp_b      (bmp_b),
+        .bmp_active (bmp_active),
+        .pal_clk    (cpu_clk),
+        .pal_we     (bmp_pal_we),
+        .pal_idx    (bmp_pal_idx),
+        .pal_data   (bmp_pal_data),
+        .sdram_clk  (sdram_clk),
+        .fb_go      (bmp_fb_go),
+        .fb_base    (bmp_fb_base),
+        .fb_len     (bmp_fb_len),
+        .fb_valid   (bmp_fb_valid),
+        .fb_word    (bmp_fb_word),
+        .fb_done    (bmp_fb_done)
+    );
+
+    // ========================================================================
     // PS/2 keyboard bridge (Phase e):  hps_io ps2_key -> smc_x16 byte stream
     // ========================================================================
     wire [7:0] smc_uart_byte;
@@ -1416,6 +1519,8 @@ module emu
                     via1_cs   ? via1_data    :
                     via2_cs   ? via2_data    :
                     serial0_cs ? serial0_data :
+                    bmp_fb_rd  ? sdram_rd     :   // $9F65 read = framebuffer byte (SDRAM)
+                    bmp_sel    ? bmp_do       :   // $9F60-$9F6F bitmap regs (OSD-gated)
                     lowram_cs ? lowram_data  :
                                 open_bus_r;   // unmapped: floating bus
 
@@ -1425,12 +1530,47 @@ module emu
     assign CLK_VIDEO   = pix_clk;
     assign CE_PIXEL    = 1'b1;
 
-    assign VGA_R       = {vera_r, vera_r};
-    assign VGA_G       = {vera_g, vera_g};
-    assign VGA_B       = {vera_b, vera_b};
-    assign VGA_HS      = vera_hs;
-    assign VGA_VS      = vera_vs;
-    assign VGA_DE      = vera_de;
+    // Bitmap layer composited with VERA.  HS/VS/DE stay VERA's -- the bitmap
+    // rides its raster.  Default (passthru=0): the bitmap fully replaces VERA.
+    // With CTRL[3] passthru=1: wherever VERA has an opaque pixel (a sprite --
+    // e.g. the mouse cursor -- or a layer) VERA shows OVER the bitmap; the
+    // bitmap fills everywhere VERA is transparent.  That keeps the hardware
+    // mouse pointer visible on a bitmap desktop (see vera_2.md / CXRF).
+    // ---- bitmap / VERA horizontal alignment -----------------------------
+    // The bitmap engine emits each pixel BMP_ALIGN pix_clks after vera_de
+    // (linebuf-read + palette-read + output regs).  VERA's own pixels come
+    // out at vera_de with no such delay, so composited directly the bitmap
+    // sits BMP_ALIGN px to the right and VERA peeks through the left edge
+    // (visible only on real hardware -- the emulator composites per pixel).
+    // Delay the whole VERA output bus by the same amount so the two line up.
+    // Gated by the OSD master-enable: with the layer Off the VERA path is
+    // bit-for-bit stock timing.  bitmap_engine is still fed the UNDELAYED
+    // vera_de/vera_vs, so its internal timing is unchanged.
+    localparam integer BMP_ALIGN = 4;
+    reg [15:0] vera_dly [0:BMP_ALIGN-1];
+    integer bai;
+    always @(posedge pix_clk) begin
+        vera_dly[0] <= {vera_hs, vera_vs, vera_de, vera_opaque,
+                        vera_r, vera_g, vera_b};
+        for (bai = 1; bai < BMP_ALIGN; bai = bai + 1)
+            vera_dly[bai] <= vera_dly[bai-1];
+    end
+    wire [15:0] vdl  = vera_dly[BMP_ALIGN-1];
+    wire        a_hs = bmp_master_en ? vdl[15]   : vera_hs;
+    wire        a_vs = bmp_master_en ? vdl[14]   : vera_vs;
+    wire        a_de = bmp_master_en ? vdl[13]   : vera_de;
+    wire        a_op = bmp_master_en ? vdl[12]   : vera_opaque;
+    wire  [3:0] a_r  = bmp_master_en ? vdl[11:8] : vera_r;
+    wire  [3:0] a_g  = bmp_master_en ? vdl[7:4]  : vera_g;
+    wire  [3:0] a_b  = bmp_master_en ? vdl[3:0]  : vera_b;
+
+    wire use_bmp = bmp_active & ~(bmp_passthru & a_op);
+    assign VGA_R       = use_bmp ? {bmp_r, bmp_r} : {a_r, a_r};
+    assign VGA_G       = use_bmp ? {bmp_g, bmp_g} : {a_g, a_g};
+    assign VGA_B       = use_bmp ? {bmp_b, bmp_b} : {a_b, a_b};
+    assign VGA_HS      = a_hs;
+    assign VGA_VS      = a_vs;
+    assign VGA_DE      = a_de;
     assign VGA_F1      = 1'b0;
     assign VGA_SL      = 2'b00;
     assign VGA_SCALER  = 1'b0;

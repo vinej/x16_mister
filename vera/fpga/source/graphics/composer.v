@@ -37,7 +37,12 @@ module composer(
     input  wire        display_next_line,
     input  wire        display_next_pixel,
     input  wire        display_current_field,
-    output reg   [7:0] display_data);
+    output reg   [7:0] display_data,
+    // 1 when this pixel is opaque VERA content (a sprite or a layer pixel, i.e.
+    // display_data != 0 inside the active area) -- lets an external compositor
+    // (the MiSTer bitmap layer) show VERA sprites OVER the bitmap.  Same timing
+    // as display_data (both combinational off display_active).
+    output wire        display_opaque);
 
     // Interlaced modes have double the amount of horizontal clocks
     wire [7:0] frac_x_incr_int = interlaced ? {1'b0, frac_x_incr[7:1]} : frac_x_incr;
@@ -199,5 +204,9 @@ module composer(
             if (sprites_enabled && sprite_opaque && sprite_z3) display_data = sprite_lb_rddata[7:0];
         end
     end
+
+    // Opaque = a real VERA pixel in the active area (index != 0).  Border and
+    // blanking read 0 here, so the external bitmap fills them.
+    assign display_opaque = display_active & (display_data != 8'h00);
 
 endmodule

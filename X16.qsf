@@ -100,6 +100,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/nvram_backer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ps2_to_smc_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ext_ram_sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ext_ram_bram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/bitmap_regs.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/bitmap_engine.sv
 set_global_assignment -name VERILOG_FILE rtl/sdram.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/smc_i2c_slave.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/i2c_bb.sv

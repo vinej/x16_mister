@@ -20,7 +20,11 @@ module video_vga(
     output reg         vga_vsync,
     // 2026-06-21: added vga_de for HDMI sinks (ADV7513 needs DE strobe).
     // Pipelined with vga_r/g/b so it aligns to valid pixel data.
-    output reg         vga_de);
+    output reg         vga_de,
+    // Opacity bit for the external bitmap compositor: registered in the same
+    // stage as vga_r/g/b so it aligns to the colour it describes.
+    input  wire        opaque_in,
+    output reg         vga_opaque);
 
     assign next_pixel = 1'b1;
 
@@ -88,6 +92,7 @@ module video_vga(
             vga_hsync <= 1;
             vga_vsync <= 1;
             vga_de    <= 1'b0;
+            vga_opaque <= 1'b0;
 
         end else begin
             if (active_r[1]) begin
@@ -100,9 +105,10 @@ module video_vga(
                 vga_b <= 4'd0;
             end
 
-            vga_hsync <= ~hsync_r[1];
-            vga_vsync <= ~vsync_r[1];
-            vga_de    <= active_r[1];
+            vga_hsync  <= ~hsync_r[1];
+            vga_vsync  <= ~vsync_r[1];
+            vga_de     <= active_r[1];
+            vga_opaque <= opaque_in;
         end
     end
 

@@ -119,6 +119,31 @@ case "${1:-both}" in
     vlog -quiet -sv ../rtl/ext_ram_sdram.sv sdram_sim.v tb_wfifo.v
     vsim -c -do "run -all; quit -f" tb_wfifo 2>&1 | grep -E "WF|Error|Fatal"
     exit 0 ;;
+  fb)
+    # Framebuffer 16-bit-tap read/stream path (SDRAM-backed bitmap layer):
+    # sdram.v dout16 + planar layout + ext_ram_sdram fb stream client.  Checks
+    # single word, full 640px line + cadence, CPU interleave, planar write
+    # round-trip.  sdram_sim.v is the two-plane 16-bit model.
+    vlog -quiet -sv ../rtl/ext_ram_sdram.sv sdram_sim.v tb_fb.v
+    vsim -c -do "run -all; quit -f" tb_fb 2>&1 | grep -E "FB  |Error|Fatal"
+    exit 0 ;;
+  bitmap)
+    # SDRAM-backed bitmap layer.  bitmap_regs: $9F60-$6F decode / planar addr /
+    # palette / pointer.  bitmap_engine: scanout vs golden image (real engine <->
+    # ext_ram_sdram <-> sdram_sim, VERA-like raster in, every scanned pixel
+    # checked against palette[golden(x,y)]).  TMODE=1 (8bpp), TMODE=2 (4bpp).
+    vlog -quiet -sv ../rtl/bitmap_regs.sv tb_bmpregs.v
+    vsim -c -do "run -all; quit -f" tb_bmpregs 2>&1 | grep -E "BR  |Error|Fatal"
+    vlog -quiet -sv ../rtl/bitmap_regs.sv ../rtl/ext_ram_sdram.sv sdram_sim.v tb_bmpio.v
+    vsim -c -do "run -all; quit -f" tb_bmpio 2>&1 | grep -E "BIO |Error|Fatal"
+    vlog -quiet -sv ../rtl/bitmap_regs.sv ../rtl/ext_ram_sdram.sv sdram_sim.v tb_blit.v
+    vsim -c -do "run -all; quit -f" tb_blit 2>&1 | grep -E "BLIT|Error|Fatal"
+    vlog -quiet -sv ../rtl/bitmap_engine.sv ../rtl/ext_ram_sdram.sv sdram_sim.v tb_bitmap.v
+    for M in 1 2; do
+      echo "----- TMODE=$M -----"
+      vsim -c -gTMODE=$M -do "run -all; quit -f" tb_bitmap 2>&1 | grep -E "BMP |Error|Fatal"
+    done
+    exit 0 ;;
   boot816)
     # FULL R49 ROM BOOT on the P65C816 (65C816 branch): the ROM detects the
     # '816 and boots through the NATIVE-mode paths -- the exact route the HW

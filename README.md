@@ -2,6 +2,25 @@
 
 Note: 128M SDRAM module is needed for the X16 core.
 
+## version 1.3 :
+
+**EXPERIMENTAL — "VERA2" bitmap layer.** An optional SDRAM-backed **640×480
+4bpp / 8bpp** linear bitmap layer — the high-resolution mode VERA advertises but
+its 128 KB of VRAM can't hold — mapped at `$9F60`–`$9F6F` and composited over
+VERA. It is **off by default**; nothing changes for existing software unless you
+turn it on.
+
+**How to activate:** in the OSD, set **VERA2 Bitmap Layer → On**. A program then
+drives the registers at `$9F60`–`$9F6F` (write pixels, load the palette, use the
+SDRAM→SDRAM blit for fast fills / save-under). With the layer **Off** the core
+behaves exactly as before.
+
+* **Documentation / register spec** — [vera_2.md](vera_2.md)
+* **Demos** — source (`.s`) + `.PRG` + a ready-to-mount SD image — [demo/](demo/)
+* **Emulator that supports v1.3** — a fork of the X16 emulator adding the same
+  layer via the `-bitmap2` flag, so you can develop and test VERA2 programs on a
+  PC: **[github.com/vinej/x16-emulator](https://github.com/vinej/x16-emulator)**
+
 ## version 1.2 :
 
 Add serial card emulation done by jnngill
@@ -30,7 +49,7 @@ strange bugs to resolve. It worked only after switching to Claude MAX with Fable
 
 | File                     | Description                   | Where to put it |
 |--------------------------|-------------------------------|-----------------|
-| `/rom/X16_20260714.rbf`  | version 1.0 no baked ROM      | `_Computer/`    |
+| `/rom/X16_20260722.rbf`  | version 1.3 no baked ROM      | `_Computer/`    |
 | your own boot1.rom       | tested with R49               | `games/X16/`    |
 
 (The published `.rbf` contains **no ROM** — the X16 ROM is not ours to

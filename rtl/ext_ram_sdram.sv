@@ -37,7 +37,9 @@
 //
 // NOTE: requires the MiSTer SDRAM module present.  Needs PLL outclk_3 = 100 MHz.
 //============================================================================
-module ext_ram_sdram (
+module ext_ram_sdram #(
+    parameter [23:0] FB_BASE_WORD = 24'h800000   // bitmap framebuffer word base (blit only)
+)(
     input  logic        clk,          // cpu_clk (8 MHz)  -- CPU interface domain
     input  logic        sdram_clk,    // 100 MHz          -- SDRAM controller domain
     input  logic        reset_n,      // async; released in cpu_clk domain
@@ -72,6 +74,45 @@ module ext_ram_sdram (
     // for sector dirty tracking.  Loader/backup traffic never pulses this.
     output logic        wr_snoop,
     output logic [24:0] wr_snoop_addr,
+
+    // Framebuffer streaming read port (sdram_clk domain) -- bitmap engine line
+    // prefetch.  ONE access returns ONE 16-bit word = 2 px @8bpp / 4 px @4bpp
+    // via the tap (sdram.v dout16).  The framebuffer is stored PLANAR: even
+    // pixels in the low-byte plane, odd pixels in the high-byte plane of the
+    // SAME word (byte i -> word=FB_BASE+(i>>1), plane=i[0]=A24), so one word
+    // carries two consecutive pixels.  A run streams fb_len words from word
+    // fb_base; each completed word pulses fb_valid with fb_word, and fb_done
+    // pulses at the end.  CPU/refresh preempt fb BETWEEN words (never mid-word)
+    // -- see the fb branch below sitting under req_pending -- so no CPU access
+    // waits longer than one streamed word + one access, respecting the r65c02
+    // short-stall rule (DUAL-CLOCK note above).
+    //
+    // COHERENCY: fb reads pull straight from SDRAM and do NOT wait on the CPU
+    // write FIFO, so a pixel the CPU wrote microseconds ago may still be in the
+    // FIFO when scanned.  That is fine -- the FIFO drains long before the next
+    // frame scans that line, so the framebuffer is frame-coherent (all a
+    // display needs); coupling fb to the FIFO would only throttle scanout.
+    //
+    // When the bitmap layer is disabled fb_go is never pulsed and this port is
+    // fully idle: zero SDRAM impact, bit-identical to today.
+    input  logic        fb_go,        // pulse: start a run (ignored mid-run)
+    input  logic [23:0] fb_base,      // first 16-bit WORD index (A24 forced 0)
+    input  logic [10:0] fb_len,       // words to stream (1..1024; 0 = no-op)
+    output logic        fb_valid,     // pulse: fb_word holds the next word
+    output logic [15:0] fb_word,      // {odd px, even px} @8bpp / 4 nibbles @4bpp
+    output logic        fb_done,      // pulse: run finished
+
+    // Blit engine (bitmap save-under): copy blit_len bytes from framebuffer byte
+    // address blit_src to blit_dst, both in the FB_BASE_WORD planar space.  Runs
+    // byte-wise (read a byte, write it) so any src/dst alignment works, as a
+    // LOW-priority client (below scanout) -- it's brief (dialog open/close) and
+    // must never glitch the display.  blit_start/blit_done are 1-bit TOGGLES
+    // (CDC); blit_src/dst/len are stable from the start toggle until the next.
+    input  logic        blit_start,
+    input  logic [19:0] blit_src,
+    input  logic [19:0] blit_dst,
+    input  logic [19:0] blit_len,     // bytes (0 = no-op)
+    output logic        blit_done,
 
     // SDRAM chip pins (forwarded from sdram.v)
     output logic [12:0] SDRAM_A,
@@ -112,6 +153,7 @@ module ext_ram_sdram (
     logic [24:0] acc_addr;
     logic  [7:0] acc_wdata;
     wire   [7:0] sd_dout;
+    wire  [15:0] sd_dout16;      // framebuffer 16-bit tap (both byte lanes)
     wire   [1:0] sd_dqm;
 
     sdram u_sdram (
@@ -130,6 +172,7 @@ module ext_ram_sdram (
         .addr    (acc_addr),
         .din     (acc_wdata),
         .dout    (sd_dout),
+        .dout16  (sd_dout16),
         .refresh (sd_refresh),
         .ce      (sd_ce),
         .we      (sd_we_l)
@@ -290,6 +333,23 @@ module ext_ram_sdram (
     logic       req_d, req_pending;
     logic       acc_is_ld;
     logic       acc_is_bk, bk_pending;
+    // Framebuffer stream: an fb access reuses the S_ACC path but completes
+    // EARLY (the word is valid by q>=5 in sdram.v), so back-to-back fb words
+    // run at sdram.v's native ~8-cycle cadence instead of the 11-cycle generic
+    // path -- the throughput 640x480x8bpp needs.  fb_active/_ptr/_left carry
+    // the run across the S_IDLE hops where CPU/refresh interleave.
+    localparam [3:0] FB_CYC = 4'd6;    // fb completion cyc (vs CYCLE_LEN=9)
+    logic        acc_is_fb, fb_active;
+    logic [23:0] fb_ptr;
+    logic [10:0] fb_left;
+
+    // Blit client: alternates READ (capture a byte) / WRITE (store it),
+    // advancing until blen hits 0.  Sits below the scanout in S_IDLE priority.
+    logic        acc_is_blit, blit_active, blit_wr;
+    logic  [7:0] blit_byte;
+    logic [19:0] bsrc, bdst, blen;
+    logic  [1:0] bstart_s;
+    logic        bstart_d;
 
     logic [32:0] ldfifo [0:7];                 // {ld_addr, ld_data}
     logic  [2:0] ldf_rd, ldf_wr;
@@ -309,12 +369,36 @@ module ext_ram_sdram (
             acc_is_bk <= 1'b0; bk_pending <= 1'b0; bk_ack <= 1'b0;
             bk_rdata <= 8'h00; wr_snoop <= 1'b0; wr_snoop_addr <= 25'h0;
             ldf_rd <= 3'd0; ldf_wr <= 3'd0; ldf_cnt <= 4'd0;
+            acc_is_fb <= 1'b0; fb_active <= 1'b0; fb_ptr <= 24'h0;
+            fb_left <= 11'd0; fb_valid <= 1'b0; fb_word <= 16'h0; fb_done <= 1'b0;
+            acc_is_blit <= 1'b0; blit_active <= 1'b0; blit_wr <= 1'b0;
+            blit_byte <= 8'h0; bsrc <= 20'd0; bdst <= 20'd0; blen <= 20'd0;
+            bstart_s <= 2'b0; bstart_d <= 1'b0; blit_done <= 1'b0;
         end else begin
             sd_ce      <= 1'b0;   // ce/refresh are single-cycle triggers
             sd_refresh <= 1'b0;
             bk_ack     <= 1'b0;   // 1-cycle pulses
             wr_snoop   <= 1'b0;
+            fb_valid   <= 1'b0;   // fb pulses
+            fb_done    <= 1'b0;
             if (bk_rd) bk_pending <= 1'b1;
+            // Latch a stream request (ignored while a run is in flight; the
+            // bitmap engine waits for fb_done before issuing the next line).
+            if (fb_go && !fb_active && (fb_len != 11'd0)) begin
+                fb_active <= 1'b1;
+                fb_ptr    <= fb_base;
+                fb_left   <= fb_len;
+            end
+            // Blit start (toggle CDC): capture the stable params and go, if idle.
+            bstart_s <= {bstart_s[0], blit_start};
+            bstart_d <= bstart_s[1];
+            if ((bstart_s[1] != bstart_d) && !blit_active && (blit_len != 20'd0)) begin
+                blit_active <= 1'b1;
+                blit_wr     <= 1'b0;      // first phase = read the source byte
+                bsrc        <= blit_src;
+                bdst        <= blit_dst;
+                blen        <= blit_len;
+            end
 
             // synchronize the CPU's request toggle, latch a pending request
             req_s <= {req_s[0], req_tgl};
@@ -345,6 +429,8 @@ module ext_ram_sdram (
                         ldf_rd                <= ldf_rd + 3'd1;
                         acc_is_ld             <= 1'b1;
                         acc_is_bk             <= 1'b0;
+                        acc_is_fb             <= 1'b0;
+                        acc_is_blit           <= 1'b0;
                         cyc                   <= 4'd0;
                         state                 <= S_ACC;
                     end else if (req_pending) begin
@@ -355,12 +441,46 @@ module ext_ram_sdram (
                         acc_wdata   <= lat_wdata;
                         acc_is_ld   <= 1'b0;
                         acc_is_bk   <= 1'b0;
+                        acc_is_fb   <= 1'b0;
+                        acc_is_blit <= 1'b0;
                         cyc         <= 4'd0;
                         req_pending <= 1'b0;
                         state       <= S_ACC;
                         // dirty snoop for cart_backer (CPU writes only)
                         wr_snoop      <= lat_we;
                         wr_snoop_addr <= lat_addr;
+                    end else if (fb_active && (fb_left != 11'd0)) begin
+                        // framebuffer word: full 16-bit read (A24=0).  Runs
+                        // BELOW the CPU so a pending CPU access always slots in
+                        // between fb words (bounded stall); completes early at
+                        // FB_CYC for native-rate streaming (see S_ACC below).
+                        sd_ce      <= 1'b1;
+                        sd_we_l    <= 1'b0;
+                        acc_addr   <= {1'b0, fb_ptr};
+                        acc_is_ld  <= 1'b0;
+                        acc_is_bk  <= 1'b0;
+                        acc_is_fb  <= 1'b1;
+                        acc_is_blit<= 1'b0;
+                        cyc        <= 4'd0;
+                        state      <= S_ACC;
+                    end else if (blit_active) begin
+                        // blit byte: READ src then WRITE dst (planar), below
+                        // scanout so the display never glitches during a copy.
+                        sd_ce       <= 1'b1;
+                        acc_is_ld   <= 1'b0;
+                        acc_is_bk   <= 1'b0;
+                        acc_is_fb   <= 1'b0;
+                        acc_is_blit <= 1'b1;
+                        cyc         <= 4'd0;
+                        if (!blit_wr) begin
+                            sd_we_l  <= 1'b0;
+                            acc_addr <= {bsrc[0], (FB_BASE_WORD + {5'b0, bsrc[19:1]})};
+                        end else begin
+                            sd_we_l   <= 1'b1;
+                            acc_addr  <= {bdst[0], (FB_BASE_WORD + {5'b0, bdst[19:1]})};
+                            acc_wdata <= blit_byte;
+                        end
+                        state <= S_ACC;
                     end else if (bk_pending) begin
                         // backup read: lowest priority, single byte
                         sd_ce      <= 1'b1;
@@ -368,6 +488,8 @@ module ext_ram_sdram (
                         acc_addr   <= bk_addr;
                         acc_is_ld  <= 1'b0;
                         acc_is_bk  <= 1'b1;
+                        acc_is_fb  <= 1'b0;
+                        acc_is_blit<= 1'b0;
                         cyc        <= 4'd0;
                         bk_pending <= 1'b0;
                         state      <= S_ACC;
@@ -375,10 +497,42 @@ module ext_ram_sdram (
                 end
                 S_ACC: begin
                     cyc <= cyc + 4'd1;
-                    if (cyc == CYCLE_LEN) begin
+                    if (acc_is_fb) begin
+                        // fb read: the word is valid by q>=5 in sdram.v, so we
+                        // complete at FB_CYC(6) and the NEXT fb word issues on
+                        // the following S_IDLE cycle -> ~8-cycle cadence.  A CPU
+                        // or refresh request pending at that S_IDLE preempts
+                        // (it sits above the fb branch) -> automatic interleave,
+                        // no fb word ever split.
+                        if (cyc == FB_CYC) begin
+                            fb_word  <= sd_dout16;
+                            fb_valid <= 1'b1;
+                            fb_ptr   <= fb_ptr + 24'd1;
+                            fb_left  <= fb_left - 11'd1;
+                            if (fb_left == 11'd1) begin
+                                fb_active <= 1'b0;
+                                fb_done   <= 1'b1;
+                            end
+                            state <= S_IDLE;
+                        end
+                    end else if (cyc == CYCLE_LEN) begin
                         if (acc_is_bk) begin
                             bk_rdata <= sd_dout;
                             bk_ack   <= 1'b1;
+                        end else if (acc_is_blit) begin
+                            if (!blit_wr) begin
+                                blit_byte <= sd_dout;     // captured src byte
+                                blit_wr   <= 1'b1;        // -> write it to dst
+                            end else begin
+                                bsrc    <= bsrc + 20'd1;
+                                bdst    <= bdst + 20'd1;
+                                blen    <= blen - 20'd1;
+                                blit_wr <= 1'b0;          // -> read next byte
+                                if (blen == 20'd1) begin
+                                    blit_active <= 1'b0;
+                                    blit_done   <= ~blit_done;
+                                end
+                            end
                         end else if (!acc_is_ld) begin
                             rd_data_f <= sd_dout;
                             ack_tgl   <= ~ack_tgl;   // completion to CPU domain

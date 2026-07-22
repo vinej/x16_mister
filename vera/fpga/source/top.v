@@ -20,6 +20,10 @@ module top(
     // 2026-06-21: added vga_de for HDMI sinks (ADV7513 needs DE).  Aligned
     // with vga_r/g/b through the same posedge-clk register stage in top.v.
     output reg        vga_de,
+    // Opacity bit for the external MiSTer bitmap compositor: 1 = this pixel is
+    // a VERA sprite/layer pixel (show VERA), 0 = transparent (show bitmap).
+    // Aligned with vga_r/g/b through every register stage.
+    output reg        vga_opaque,
 
     // SPI interface
     output wire       spi_sck,
@@ -1021,6 +1025,7 @@ module top(
     // Composer
     //////////////////////////////////////////////////////////////////////////
     wire [7:0] composer_display_data;
+    wire       composer_display_opaque;
     wire       next_pixel;
     wire       next_frame;
     wire       composer_display_current_field;
@@ -1063,7 +1068,14 @@ module top(
         .display_next_line(next_line),
         .display_next_pixel(next_pixel),
         .display_current_field(composer_display_current_field),
-        .display_data(composer_display_data));
+        .display_data(composer_display_data),
+        .display_opaque(composer_display_opaque));
+
+    // Delay the opacity bit by one clock to align with palette_rgb_data (the
+    // palette read stage), then it rides video_vga's and top's output
+    // registers alongside vga_r/g/b -- see video_vga.opaque_in / vga_opaque.
+    reg composer_display_opaque_r;
+    always @(posedge clk) composer_display_opaque_r <= composer_display_opaque;
 
     //////////////////////////////////////////////////////////////////////////
     // Palette
@@ -1143,6 +1155,7 @@ module top(
 
     wire [3:0] video_vga_r, video_vga_g, video_vga_b;
     wire       video_vga_hsync, video_vga_vsync, video_vga_de;
+    wire       video_vga_opaque;
 
     video_vga video_vga(
         .rst(reset),
@@ -1162,7 +1175,9 @@ module top(
         .vga_b(video_vga_b),
         .vga_hsync(video_vga_hsync),
         .vga_vsync(video_vga_vsync),
-        .vga_de(video_vga_de));
+        .vga_de(video_vga_de),
+        .opaque_in(composer_display_opaque_r),
+        .vga_opaque(video_vga_opaque));
 
     //////////////////////////////////////////////////////////////////////////
     // Video output selection
@@ -1192,12 +1207,13 @@ module top(
     wire display_on = (video_output_mode_r != 2'b00);
 
     always @(posedge clk) begin
-        vga_r     <= display_on ? video_vga_r : 4'd0;
-        vga_g     <= display_on ? video_vga_g : 4'd0;
-        vga_b     <= display_on ? video_vga_b : 4'd0;
-        vga_hsync <= video_vga_hsync;
-        vga_vsync <= video_vga_vsync;
-        vga_de    <= video_vga_de;
+        vga_r      <= display_on ? video_vga_r : 4'd0;
+        vga_g      <= display_on ? video_vga_g : 4'd0;
+        vga_b      <= display_on ? video_vga_b : 4'd0;
+        vga_hsync  <= video_vga_hsync;
+        vga_vsync  <= video_vga_vsync;
+        vga_de     <= video_vga_de;
+        vga_opaque <= display_on & video_vga_opaque;   // no VERA output -> no sprites
     end
 
     //////////////////////////////////////////////////////////////////////////
