@@ -112,8 +112,11 @@ module x16_serial_card
     wire [7:0] iir_value = fifo_en ? 8'hC1 : 8'h01;
 
     assign uart_txd = loopback ? 1'b1 : tx_line;
-    assign uart_rts = loopback ? 1'b0 : mcr[1];
-    assign uart_dtr = loopback ? 1'b0 : mcr[0];
+    // The Cyclone V HPS UART exposes active-low modem-control pins. Keep
+    // 16550 MCR semantics active-high inside the guest and invert only at
+    // the HPS-facing boundary.
+    assign uart_rts = loopback ? 1'b1 : ~mcr[1];
+    assign uart_dtr = loopback ? 1'b1 : ~mcr[0];
 
     function [15:0] bit_ticks;
         input [15:0] div;

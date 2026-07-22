@@ -128,6 +128,7 @@ module emu
         "F2,BINROM,Load Cart;",   // ioctl_index = 2 -> SDRAM cart space, bank 32+
         "-;",
         "O[1],CPU,65C816,65C02;", // status[1] -> cpu02_sel (latched in reset)
+        "O[2],MiSTer UART,$9FE0,$9FE8;", // fixed host-UART guest address
         "-;",
         "J1,A,B,X,Y,L,R,Select,Start;",  // SNES pad buttons -> joy[4..11]
         "V,v1.0"
@@ -1297,23 +1298,40 @@ module emu
     //
     // ROMTERM expects the X16 serial/network card default at IO7-Low with
     // two distinct UARTs at $9FE0 and $9FE8. MiSTer only exposes one host
-    // UART, so both guest UART register banks see the same RX/CTS/DSR inputs
-    // and the last-written guest UART owns TX/RTS/DTR. The physical card does
-    // not cross-connect DTR between UARTs and has no RI input. ROMTERM expects
-    // the companion RI bit to stay low while probing DTR; cross-connecting
-    // these signals rejects the card.
+    // UART, so status[2] maps it to one guest UART at a time. This mirrors the
+    // card's separate network ($9FE0) and physical serial ($9FE8) connectors
+    // without trying to infer ROMTERM's selected port from register traffic.
+    // Feeding RX to both banks duplicates replies into the companion FIFO.
+    // Changing the OSD mapping resets both banks to discard stale data. The
+    // physical card does not cross-connect DTR between UARTs and has no RI
+    // input. ROMTERM expects the companion RI bit to stay low while probing
+    // DTR; cross-connecting it rejects the card.
     // ========================================================================
     wire [7:0] serial0_data;
     wire [7:0] serial1_data;
     wire serial0_txd, serial0_rts, serial0_dtr;
     wire serial1_txd, serial1_rts, serial1_dtr;
+    reg [1:0] serial_port_sync = 2'b00;
     reg serial_uart_sel = 1'b0;
+    reg [1:0] serial_reset_hold = 2'b00;
+    wire serial_reset_n = cpu_reset_n & (serial_reset_hold == 2'b00);
+    wire serial0_rxd = serial_uart_sel ? 1'b1 : UART_RXD;
+    wire serial1_rxd = serial_uart_sel ? UART_RXD : 1'b1;
 
     always @(posedge cpu_clk or negedge cpu_reset_n) begin
-        if (!cpu_reset_n) serial_uart_sel <= 1'b0;
-        else if (cpu_rdy && ~cpu_rwn) begin
-            if (serial0_cs) serial_uart_sel <= 1'b0;
-            if (serial1_cs) serial_uart_sel <= 1'b1;
+        if (!cpu_reset_n) begin
+            serial_port_sync <= 2'b00;
+            serial_uart_sel <= 1'b0;
+            serial_reset_hold <= 2'b00;
+        end
+        else begin
+            serial_port_sync <= {serial_port_sync[0], status[2]};
+            if (serial_port_sync[1] != serial_uart_sel) begin
+                serial_uart_sel <= serial_port_sync[1];
+                serial_reset_hold <= 2'b11;
+            end else if (serial_reset_hold != 2'b00) begin
+                serial_reset_hold <= serial_reset_hold - 2'b01;
+            end
         end
     end
 
@@ -1322,14 +1340,14 @@ module emu
         .DEFAULT_DIVISOR(16'd8)
     ) u_serial0 (
         .clk      (cpu_clk),
-        .reset_n  (cpu_reset_n),
+        .reset_n  (serial_reset_n),
         .cs       (serial0_cs),
         .rwn      (cpu_rwn),
         .enable   (cpu_rdy),
         .addr     (cpu_a[2:0]),
         .di       (cpu_do),
         .do_o     (serial0_data),
-        .uart_rxd (UART_RXD),
+        .uart_rxd (serial0_rxd),
         .uart_cts (UART_CTS),
         .uart_dsr (UART_DSR),
         .uart_ri  (1'b0),
@@ -1343,14 +1361,14 @@ module emu
         .DEFAULT_DIVISOR(16'd8)
     ) u_serial1 (
         .clk      (cpu_clk),
-        .reset_n  (cpu_reset_n),
+        .reset_n  (serial_reset_n),
         .cs       (serial1_cs),
         .rwn      (cpu_rwn),
         .enable   (cpu_rdy),
         .addr     (cpu_a[2:0]),
         .di       (cpu_do),
         .do_o     (serial1_data),
-        .uart_rxd (UART_RXD),
+        .uart_rxd (serial1_rxd),
         .uart_cts (UART_CTS),
         .uart_dsr (UART_DSR),
         .uart_ri  (1'b0),
