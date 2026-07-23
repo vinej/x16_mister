@@ -21,6 +21,16 @@ behaves exactly as before.
   layer via the `-bitmap2` flag, so you can develop and test VERA2 programs on a
   PC: **[github.com/vinej/x16-emulator](https://github.com/vinej/x16-emulator)**
 
+**Fixed — cartridge banks 32–255 were writable with no cartridge present.** On
+real X16 hardware those banks are whatever a physical cartridge provides (ROM /
+RAM / flash); with nothing plugged in there is no RAM there to write. The core
+previously treated all of banks 32–255 as writable RAM unconditionally, which
+was wrong. They now default to **ROM** (CPU writes ignored), matching the
+hardware and the emulator. If you want the old behavior — using the cartridge
+space as extra writable RAM, or with **Mount Cart RAM** — set **OSD → Cart
+Banks 32+ → RAM**. (The same behavior is available in the emulator fork with the
+`-cartram` flag.)
+
 ## version 1.2 :
 
 Add serial card emulation done by jnngill
@@ -114,12 +124,14 @@ bitstream with the ROM baked in redistributes the ROM indirectly.
   * banks **0–15** — the system ROM (`boot1.rom` / baked-in image);
   * banks **16–31** — unpopulated system-ROM space, reads `$FF` like empty
     flash, writes are ignored;
-  * banks **32–255** — the X16 **cartridge space**, fully **readable and
-    writable** (backed by SDRAM). Software can copy ROM images into these
-    banks and run them in place, or use them as 3.5 MB of extra storage —
-    matching the real X16, where cartridge banks may be RAM, ROM or flash.
-    Fill them from the OSD with **Load Cart** or at core start with
-    `boot2.rom` (see Usage above).
+  * banks **32–255** — the X16 **cartridge space** (SDRAM-backed, 3.5 MB).
+    By default these read/execute as **ROM** (CPU writes ignored), matching
+    real hardware where nothing is present without a cartridge. Set **OSD →
+    Cart Banks 32+ → RAM** to make them CPU-writable — then software can use
+    the space as extra RAM, self-modify loaded images, or persist it with
+    **Mount Cart RAM**. Either way you can fill them from the OSD with **Load
+    Cart** or at core start with `boot2.rom` (the loader writes regardless of
+    the ROM/RAM setting).
 
 The vector page $FFFA–$FFFF always reads from ROM bank 0, so interrupts keep
 hitting the KERNAL handlers whatever bank is selected.

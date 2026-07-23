@@ -130,6 +130,7 @@ module emu
         "O[1],CPU,65C816,65C02;", // status[1] -> cpu02_sel (latched in reset)
         "-;",
         "O[2],VERA2 Bitmap Layer,Off,On;", // status[2] master-enable: SDRAM 640x480 4/8bpp bitmap ($9F60)
+        "O[3],Cart Banks 32+,ROM,RAM;", // status[3]: 0=ROM (CPU writes to $C000-$FFFF banks 32-255 ignored, like the emulator), 1=RAM (writable, SDRAM). Loader (Load Cart / Mount Cart RAM) fills banks regardless.
         "-;",
         "J1,A,B,X,Y,L,R,Select,Start;",  // SNES pad buttons -> joy[4..11]
         "V,v1.3"
@@ -730,7 +731,13 @@ module emu
     // so they cannot close a comb loop through `ready`; u_bmp_regs advances the
     // pointer on the cpu_rdy commit.  Both are OSD-gated via the regs' cs.
     wire        ext_sdram_cs   = (hi_ram_cs & ~bram_sel) | cart_cs | bmp_fb_wr | bmp_fb_rd;
-    wire        ext_sdram_we   = ext_sdram_cs & ~cpu_rwn;   // read: cpu_rwn=1 -> we=0
+    // O[3] cart write-protect: 0=ROM (default, emulator-like) blocks CPU writes
+    // to cart banks 32-255; 1=RAM makes them writable (previous behavior).  Only
+    // the CPU path is gated -- the OSD Load Cart / Mount Cart RAM loader uses the
+    // separate ld_/bk_ ports, so a cart still loads/restores in ROM mode.
+    wire        cart_ram       = status[3];
+    wire        ext_sdram_we   = (ext_sdram_cs & ~cpu_rwn)      // read: cpu_rwn=1 -> we=0
+                               & ~(cart_cs & ~cart_ram);        // ROM mode -> drop cart writes
     wire [24:0] ext_sdram_addr = (bmp_fb_wr | bmp_fb_rd) ? bmp_fb_addr
                                : cart_cs                 ? {3'b001, rom_bank_r, cpu_a[13:0]}
                                :                           {4'd0,   ram_bank_r, cpu_a[12:0]};
