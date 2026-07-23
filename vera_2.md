@@ -14,7 +14,7 @@ keep working exactly as before.
 | Depths | **8bpp** (256 colors) and **4bpp** (16 colors) |
 | Palette | independent **256 × RGB444** (4 bits/channel) |
 | Registers | **`$9F60`–`$9F6F`** (I/O expansion area) |
-| Enable | OSD **“Bitmap Layer”** master switch, default **Off** |
+| Enable | OSD **“VERA2 Bitmap Layer”** master switch, default **Off** |
 | SDRAM | **1 MB** dedicated (not VRAM/HiRAM): 8bpp *displays* 307,200 B, 4bpp 153,600 B — the rest is **save‑under scratch** (a full‑screen save‑under fits) |
 
 > ⚠️ **Not real X16 hardware.** This is a core‑specific extension. Software that
@@ -25,7 +25,7 @@ keep working exactly as before.
 
 ## 1. Turning it on
 
-1. **OSD master switch.** In the MiSTer menu set **Bitmap Layer → On**. This is
+1. **OSD master switch.** In the MiSTer menu set **VERA2 Bitmap Layer → On**. This is
    the master enable; with it **Off** the machine is bit‑identical to stock and
    `$9F60`–`$9F6F` read as open bus.
 2. **Software enable.** Write the `CTRL` register to select a mode (below).
