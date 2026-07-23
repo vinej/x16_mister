@@ -87,8 +87,18 @@ module emu
     // system reset; driven next to the CPU instantiation (see u_cpu816).
     wire cpusel_reset_hold;
 
+    // SC0 hot-swap reboot (jyv 2026-07-22): mounting a NEW guest SD while the
+    // core runs must REBOOT the X16 so the KERNAL DOS re-mounts the new card.
+    // A hot-swap otherwise keeps the old card's cached BPB/FAT ("290 MB free /
+    // no files" until a relaunch); deselecting the card alone (vsd_hold) did
+    // not clear the DOS mount, so pulse a real reset like Mount Cartridge does.
+    // Driven from the sdram domain below (next to vsd_hold), same CDC path as
+    // crt_restoring.  mem_reset_n excludes it, so SDRAM (HiRAM + cart) survives.
+    wire sd_remount_hold;
+
     wire sys_rst_n = ~RESET & pll_locked & ~rom_loading & ~cart_loading
-                   & ~smc_reset_hold & ~crt_restoring & ~cpusel_reset_hold;
+                   & ~smc_reset_hold & ~crt_restoring & ~cpusel_reset_hold
+                   & ~sd_remount_hold;
 
     // Memory-side reset: excludes the download holds -- ext_ram_sdram must
     // stay ALIVE (refresh + loader port) while the cart streams into SDRAM
@@ -122,15 +132,16 @@ module emu
         // AUTO-REMOUNTS SC entries at core start (user_io.cpp checks 'S','C').
         "SC0,IMG,Mount SD;",      // X16 guest SD = a FAT32 image file on the boot SD
         "SC1,NVR,Mount NVRAM;",   // 512-byte image backing the RTC NVRAM (KERNAL settings)
-        "SC2,CRT,Mount Cart RAM;",// persistent cart image (banks 32+, same layout as Load Cart)
+        "SC2,CRT,Mount Cart;",    // cart image on SC2 -- raw all-RAM (persistent) OR typed .crt (per-bank), per the "Cart mount" toggle below
         "-;",
-        "F1,BINROM,Load ROM;",    // ioctl_index = 1; lists *.bin and *.rom
-        "F2,BINROM,Load Cart;",   // ioctl_index = 2 -> SDRAM cart space, bank 32+
+        "F1,BINROM,Load ROM;",    // ioctl_index = 1; *.bin/*.rom = the SYSTEM ROM (banks 0-15)
+        "F2,BINROM,Load Cart;",   // ioctl_index = 2 -> a cart ROM image into bank 32+ (run it)
         "-;",
         "O[1],CPU,65C816,65C02;", // status[1] -> cpu02_sel (latched in reset)
         "-;",
         "O[2],VERA2 Bitmap Layer,Off,On;", // status[2] master-enable: SDRAM 640x480 4/8bpp bitmap ($9F60)
-        "O[3],Cart Banks 32+,ROM,RAM;", // status[3]: 0=ROM (CPU writes to $C000-$FFFF banks 32-255 ignored, like the emulator), 1=RAM (writable, SDRAM). Loader (Load Cart / Mount Cart RAM) fills banks regardless.
+        "O[4],Cart mount,RAM,Typed;", // status[4]: how "Mount Cart" (SC2) reads the image -- 0=RAM (raw all-RAM image, every bank 32-255 writable, persistent dirty-sector save-back), 1=Typed (parse the X16 .crt header for per-bank ROM/RAM/NVRAM, volatile)
+        "O[3],Cart Banks 32+,By Cart,All RAM;", // status[3]: 0=By Cart (per-bank ROM/RAM from the mount's mask; no cart = ROM), 1=All RAM (force every cart bank 32-255 writable regardless, no cart needed)
         "-;",
         "J1,A,B,X,Y,L,R,Select,Start;",  // SNES pad buttons -> joy[4..11]
         "V,v1.3"
@@ -274,12 +285,21 @@ module emu
     // (run.sh relaunch: FIX=0 wedges/corrupts, FIX=4 reads clean).
     reg        vsd_mnt = 0;
     reg [26:0] vsd_hold = '1;              // 2^27-1 @ 100 MHz = ~1.34 s
+    reg [23:0] sd_mnt_rst = 24'd0;         // SC0 hot-mount reboot hold (~0.17 s)
     always @(posedge sdram_clk) begin
         if (img_mounted[0]) vsd_mnt <= |img_size;
-        if (hs_rst_sync[1])       vsd_hold <= '1;   // re-arm on every core reset
-        else if (vsd_hold != 0)   vsd_hold <= vsd_hold - 1'd1;
+        // re-arm on every core reset AND on a fresh SD mount: the SD stays
+        // deselected ~1.34 s so the ROM boot probe runs clean before the DOS
+        // re-mounts the new card (pairs with the reboot pulse below).
+        if (hs_rst_sync[1] || img_mounted[0]) vsd_hold <= '1;
+        else if (vsd_hold != 0)               vsd_hold <= vsd_hold - 1'd1;
+        // reboot pulse on a fresh mount: hold sys_rst_n low ~0.17 s then release,
+        // so the guest reboots and its DOS re-mounts the newly swapped card.
+        if (img_mounted[0])       sd_mnt_rst <= 24'hFFFFFF;
+        else if (sd_mnt_rst != 0) sd_mnt_rst <= sd_mnt_rst - 24'd1;
     end
-    wire vsd_sel = vsd_mnt & (vsd_hold == 0);
+    wire   vsd_sel         = vsd_mnt & (vsd_hold == 0);
+    assign sd_remount_hold = (sd_mnt_rst != 0);
     // memory-side reset in the sdram domain: stays RELEASED through ROM/cart
     // download holds and the cart-restore hold -- the nvram/cart backers run
     // on this (a sys_rst_n-derived reset would deadlock the restore hold,
@@ -630,7 +650,44 @@ module emu
     // (The old [7:0]==N compare missed both boot files and *.rom picks.)
     assign rom_loading = ioctl_download & ((ioctl_index[5:0] == 6'd1) |
                                            (ioctl_index      == 16'h0040));
-    wire   rom_wr_en   = ioctl_wr & rom_loading & ~ioctl_addr[26] & (ioctl_addr[25:18] == 8'd0);
+    // 16-byte "CX16 CARTRIDGE\r\n" cartridge magic -- same bytes cart_backer.sv
+    // checks; used just below to reject a cartridge dropped on the ROM slot.
+    function [7:0] rom_magic(input [3:0] i);
+        case (i)
+            4'd0: rom_magic=8'h43; 4'd1: rom_magic=8'h58;   // C X
+            4'd2: rom_magic=8'h31; 4'd3: rom_magic=8'h36;   // 1 6
+            4'd4: rom_magic=8'h20; 4'd5: rom_magic=8'h43;   // _ C
+            4'd6: rom_magic=8'h41; 4'd7: rom_magic=8'h52;   // A R
+            4'd8: rom_magic=8'h54; 4'd9: rom_magic=8'h52;   // T R
+            4'd10: rom_magic=8'h49; 4'd11: rom_magic=8'h44; // I D
+            4'd12: rom_magic=8'h47; 4'd13: rom_magic=8'h45; // G E
+            4'd14: rom_magic=8'h0D; 4'd15: rom_magic=8'h0A; // CR LF
+            default: rom_magic=8'h00;
+        endcase
+    endfunction
+
+    // Load-ROM cart guard: a "Load ROM" file that starts with the "CX16
+    // CARTRIDGE" magic is a cartridge on the ROM slot -- suppress every write
+    // that continues the magic prefix, so such a file writes NOTHING and the
+    // KERNAL banks are never overwritten (the old ROM stays intact and reboots).
+    // A real system ROM does not start with the magic, so its writes are wholly
+    // untouched -- the guard only engages while the incoming header == the magic.
+    reg  rom_hdr_match = 1'b1;                     // header prefix still == magic
+    reg  rom_reject    = 1'b0;                     // full magic seen -> block all
+    wire rom_hdr_byte  = rom_loading & ioctl_wr & (ioctl_addr[26:4] == 23'd0);  // offset 0-15
+    wire rom_hdr_hit   = rom_hdr_match & (ioctl_dout == rom_magic(ioctl_addr[3:0]));
+    always @(posedge sdram_clk) begin
+        if (!rom_loading) begin                   // re-arm between loads
+            rom_hdr_match <= 1'b1;
+            rom_reject    <= 1'b0;
+        end else if (rom_hdr_byte) begin
+            rom_hdr_match <= rom_hdr_hit;          // stays 1 while matching, 0 on mismatch
+            if (ioctl_addr[3:0] == 4'd15 && rom_hdr_hit) rom_reject <= 1'b1;  // all 16 -> cart
+        end
+    end
+    wire   rom_wr_en   = ioctl_wr & rom_loading & ~ioctl_addr[26] & (ioctl_addr[25:18] == 8'd0)
+                       & ~rom_reject                      // confirmed cart -> block everything
+                       & ~(rom_hdr_byte & rom_hdr_hit);   // magic-prefix byte -> don't write it
 
     // Cart loader (OSD "Load Cart" -> ioctl index 2, or boot2.rom auto-load):
     // the file streams RAW into the SDRAM cart space starting at ROM bank 32
@@ -731,13 +788,19 @@ module emu
     // so they cannot close a comb loop through `ready`; u_bmp_regs advances the
     // pointer on the cpu_rdy commit.  Both are OSD-gated via the regs' cs.
     wire        ext_sdram_cs   = (hi_ram_cs & ~bram_sel) | cart_cs | bmp_fb_wr | bmp_fb_rd;
-    // O[3] cart write-protect: 0=ROM (default, emulator-like) blocks CPU writes
-    // to cart banks 32-255; 1=RAM makes them writable (previous behavior).  Only
-    // the CPU path is gated -- the OSD Load Cart / Mount Cart RAM loader uses the
-    // separate ld_/bk_ ports, so a cart still loads/restores in ROM mode.
-    wire        cart_ram       = status[3];
-    wire        ext_sdram_we   = (ext_sdram_cs & ~cpu_rwn)      // read: cpu_rwn=1 -> we=0
-                               & ~(cart_cs & ~cart_ram);        // ROM mode -> drop cart writes
+    // Cart write control ($C000-$FFFF banks 32-255):
+    //   O[3]=0 "By Cart"  -> per-bank from the mounted .crt's bank_info table:
+    //                        ROM banks drop CPU writes, RAM/NVRAM banks accept
+    //                        them (cart_wmask, parsed by u_cart).  No cart = 0.
+    //   O[3]=1 "All RAM"  -> force every cart bank writable (scratch RAM, no cart).
+    // Only the CPU write path is gated; the loader (Load Cart / Mount Cartridge)
+    // uses the separate ld_/bk_ ports.  cart_wmask is loaded while the CPU is in
+    // reset (quasi-static), and feeds `we` ONLY -- never cpu_rdy (no BUG2 loop).
+    wire [255:0] cart_wmask;                                    // driven by u_cart
+    wire         cart_bank_wr  = cart_wmask[rom_bank_r];        // this bank writable?
+    wire         cart_writable = status[3] | cart_bank_wr;      // O[3] All-RAM override
+    wire         ext_sdram_we  = (ext_sdram_cs & ~cpu_rwn)      // read: cpu_rwn=1 -> we=0
+                               & ~(cart_cs & ~cart_writable);   // ROM bank -> drop write
     wire [24:0] ext_sdram_addr = (bmp_fb_wr | bmp_fb_rd) ? bmp_fb_addr
                                : cart_cs                 ? {3'b001, rom_bank_r, cpu_a[13:0]}
                                :                           {4'd0,   ram_bank_r, cpu_a[12:0]};
@@ -1228,6 +1291,7 @@ module emu
         .img_mounted    (img_mounted[2]),
         .img_readonly   (img_readonly),
         .img_size       (img_size),
+        .typed_mode     (status[4]),      // OSD "Cart mount": 0=raw all-RAM, 1=typed .crt
         .sd_lba         (sd_lba[2]),
         .sd_blk_cnt     (sd_blk_cnt[2]),
         .sd_rd          (sd_rd[2]),
@@ -1247,7 +1311,8 @@ module emu
         .bk_ack         (crt_bk_ack),
         .wr_snoop       (crt_wr_snoop),
         .wr_snoop_addr  (crt_wr_snoop_addr),
-        .restoring      (crt_restoring)
+        .restoring      (crt_restoring),
+        .cart_wmask     (cart_wmask)
     );
 
     // SNES controllers (r49 joystick.s pinout): PA2 = LATCH, PA3 = CLK

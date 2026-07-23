@@ -21,15 +21,48 @@ behaves exactly as before.
   layer via the `-bitmap2` flag, so you can develop and test VERA2 programs on a
   PC: **[github.com/vinej/x16-emulator](https://github.com/vinej/x16-emulator)**
 
-**Fixed — cartridge banks 32–255 were writable with no cartridge present.** On
-real X16 hardware those banks are whatever a physical cartridge provides (ROM /
-RAM / flash); with nothing plugged in there is no RAM there to write. The core
-previously treated all of banks 32–255 as writable RAM unconditionally, which
-was wrong. They now default to **ROM** (CPU writes ignored), matching the
-hardware and the emulator. If you want the old behavior — using the cartridge
-space as extra writable RAM, or with **Mount Cart RAM** — set **OSD → Cart
-Banks 32+ → RAM**. (The same behavior is available in the emulator fork with the
-`-cartram` flag.)
+**Cartridge banks 32–255 now behave per-bank, like real hardware.** On a real
+X16 those banks are whatever a physical cartridge provides — ROM, RAM, flash, or
+nothing — so a plain `STA` only writes where the cartridge actually has RAM. The
+core no longer treats *all* of banks 32–255 as writable RAM unconditionally.
+There are **three distinct cartridge operations**, all separate from **Load ROM**
+(`F1`, the system ROM in banks 0–15):
+
+* **Load Cart** (`F2`) — stream a raw cart **ROM** image into banks 32+ and run
+  it, like inserting a game cartridge (one-shot, read-only).
+* **Mount Cart** (`SC2`) — mount a persistent cart image, in one of two modes set
+  by the **Cart mount** toggle:
+  * **RAM** *(default)* — the whole cart space (banks 32–255) is writable RAM,
+    the image restores linearly, and CPU writes are **persisted** back to the
+    image (the classic "Mount Cart RAM" — save data or scratch RAM).
+  * **Typed** — the image is a typed **`.crt`** built with
+    [`makecart`](https://github.com/vinej/x16-emulator); the core parses its
+    header for the **per-bank** ROM / RAM / NVRAM layout, so a `STA` sticks on the
+    RAM/NVRAM banks and is dropped on the ROM banks, bit-for-bit the same as
+    `x16emu -cart game.crt`. RAM/NVRAM banks are writable in SDRAM but currently
+    **volatile** (survive a reset, not a power cycle — matching the emulator);
+    on-disk persistence is a planned follow-up.
+
+A second toggle, **Cart Banks 32+** (**By Cart** / **All RAM**), is the write
+override: *By Cart* (default) follows the mount's per-bank mask (no cart = ROM);
+*All RAM* forces every bank 32–255 writable even with no cart mounted — the old
+"3.5 MB of scratch RAM" behavior, same as the emulator fork's `-cartram` flag.
+
+**Also in 1.3:**
+
+* **Load ROM cart guard.** Pointing **Load ROM** at a typed `.crt` by mistake now
+  writes nothing and leaves the current KERNAL intact instead of overwriting it
+  and bricking the system — Load ROM refuses any file that begins with the
+  `CX16 CARTRIDGE` magic. (A *raw* cart image has no signature, so it can't be
+  told apart from a system ROM by content — use **Load Cart** for cart ROMs.)
+* **SD hot-swap.** Mounting a different SD image now cold-reboots the X16 so its
+  DOS re-mounts the new card automatically — no manual reset needed. Previously a
+  hot-swap kept the old card's directory (a corrupted/empty listing) until you
+  relaunched the whole core.
+
+(Compatibility: old raw cart images keep working unchanged — **Mount Cart** with
+its default **RAM** mode is exactly the old "Mount Cart RAM". Only the new typed
+per-bank layout needs a `.crt` from `makecart` plus **Cart mount → Typed**.)
 
 ## version 1.2 :
 
@@ -59,7 +92,7 @@ strange bugs to resolve. It worked only after switching to Claude MAX with Fable
 
 | File                     | Description                   | Where to put it |
 |--------------------------|-------------------------------|-----------------|
-| `/rom/X16_20260722.rbf`  | version 1.3 no baked ROM      | `_Computer/`    |
+| `/rom/X16_20260723.rbf`  | version 1.3 no baked ROM      | `_Computer/`    |
 | your own boot1.rom       | tested with R49               | `games/X16/`    |
 
 (The published `.rbf` contains **no ROM** — the X16 ROM is not ours to
@@ -125,13 +158,19 @@ bitstream with the ROM baked in redistributes the ROM indirectly.
   * banks **16–31** — unpopulated system-ROM space, reads `$FF` like empty
     flash, writes are ignored;
   * banks **32–255** — the X16 **cartridge space** (SDRAM-backed, 3.5 MB).
-    By default these read/execute as **ROM** (CPU writes ignored), matching
-    real hardware where nothing is present without a cartridge. Set **OSD →
-    Cart Banks 32+ → RAM** to make them CPU-writable — then software can use
-    the space as extra RAM, self-modify loaded images, or persist it with
-    **Mount Cart RAM**. Either way you can fill them from the OSD with **Load
-    Cart** or at core start with `boot2.rom` (the loader writes regardless of
-    the ROM/RAM setting).
+    Their ROM/RAM nature follows the mounted cartridge, like real hardware (see
+    the version 1.3 notes above). Fill them by running a raw ROM cart with
+    **Load Cart** (`F2`) or `boot2.rom`, or by mounting an image with
+    **Mount Cart** (`SC2`) in either **RAM** mode (all banks writable, persistent)
+    or **Typed** mode (per-bank ROM/RAM/NVRAM from a `.crt`). The **Cart Banks
+    32+** toggle overrides writability: **By Cart** (default) follows the mount's
+    per-bank mask (no cart = ROM); **All RAM** forces every bank writable.
+
+File conventions (v1.3): the **system ROM is `.bin`/`.rom`** (Load ROM / Load
+Cart); a **typed cartridge is a `.crt`** (Mount Cart → Typed). To stop a typed
+cartridge being loaded onto the ROM slot by mistake, Load ROM now **refuses any
+file that begins with the `CX16 CARTRIDGE` magic** — it writes nothing, so the
+current KERNAL is left intact.
 
 The vector page $FFFA–$FFFF always reads from ROM bank 0, so interrupts keep
 hitting the KERNAL handlers whatever bank is selected.
