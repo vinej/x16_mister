@@ -132,7 +132,7 @@ module tb_periph;
     reg  [7:0]  ps2_mwheel = 8'h00;
     wire [7:0]  ubyte;
     wire        uvalid;
-    reg  [7:0]  cap [0:15];
+    reg  [7:0]  cap [0:31];
     integer     ncap = 0;
 
     // sim-scale typematic: 200-cycle delay, then every 80 cycles
@@ -143,7 +143,7 @@ module tb_periph;
         .uart_byte(ubyte), .uart_byte_valid(uvalid)
     );
 
-    always @(posedge cclk) if (uvalid && ncap < 16) begin
+    always @(posedge cclk) if (uvalid && ncap < 32) begin
         cap[ncap] <= ubyte;
         ncap      <= ncap + 1;
     end
@@ -154,6 +154,56 @@ module tb_periph;
             errors = errors + 1;
         end
     endtask
+
+    // Toggle a new event every cpu clock.  The bridge must keep observing the
+    // input while it serializes earlier events; the old idle-only detector
+    // dropped alternating toggles in this sequence.
+    task key_burst_event(input pressed, input [7:0] code); begin
+        @(negedge cclk);
+        ps2_key <= {~ps2_key[10], pressed, 1'b0, code};
+    end endtask
+
+    task key_burst_test; begin
+        ncap = 0;
+        key_burst_event(1'b1, 8'h1C);
+        key_burst_event(1'b1, 8'h32);
+        key_burst_event(1'b1, 8'h21);
+        key_burst_event(1'b1, 8'h23);
+        key_burst_event(1'b1, 8'h24);
+        key_burst_event(1'b1, 8'h2B);
+        repeat (30) @(posedge cclk);
+        key_burst_event(1'b0, 8'h1C);
+        key_burst_event(1'b0, 8'h32);
+        key_burst_event(1'b0, 8'h21);
+        key_burst_event(1'b0, 8'h23);
+        key_burst_event(1'b0, 8'h24);
+        key_burst_event(1'b0, 8'h2B);
+        repeat (50) @(posedge cclk);
+
+        if (ncap !== 18) begin
+            $display("[KEYQ] FAIL: captured %0d bytes (expect 18)", ncap);
+            errors = errors + 1;
+        end
+        check_byte(0,  8'h1C, "burst make 1");
+        check_byte(1,  8'h32, "burst make 2");
+        check_byte(2,  8'h21, "burst make 3");
+        check_byte(3,  8'h23, "burst make 4");
+        check_byte(4,  8'h24, "burst make 5");
+        check_byte(5,  8'h2B, "burst make 6");
+        check_byte(6,  8'hF0, "burst break prefix 1");
+        check_byte(7,  8'h1C, "burst break 1");
+        check_byte(8,  8'hF0, "burst break prefix 2");
+        check_byte(9,  8'h32, "burst break 2");
+        check_byte(10, 8'hF0, "burst break prefix 3");
+        check_byte(11, 8'h21, "burst break 3");
+        check_byte(12, 8'hF0, "burst break prefix 4");
+        check_byte(13, 8'h23, "burst break 4");
+        check_byte(14, 8'hF0, "burst break prefix 5");
+        check_byte(15, 8'h24, "burst break 5");
+        check_byte(16, 8'hF0, "burst break prefix 6");
+        check_byte(17, 8'h2B, "burst break 6");
+        $display("[KEYQ] done (%0d bytes, no dropped events)", ncap);
+    end endtask
 
     task bridge_test;
         begin
@@ -352,6 +402,7 @@ module tb_periph;
                 repeat (4) @(posedge cclk);
                 pad_test;
                 bridge_test;
+                key_burst_test;
                 typematic_test;
                 rtc_test;
             end

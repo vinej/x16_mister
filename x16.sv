@@ -138,8 +138,9 @@ module emu
         "F2,BINROM,Load Cart;",   // ioctl_index = 2 -> a cart ROM image into bank 32+ (run it)
         "-;",
         "O[1],CPU,65C816,65C02;", // status[1] -> cpu02_sel (latched in reset)
+        "O[2],MiSTer UART,$9FE0,$9FE8;", // fixed host-UART guest address
         "-;",
-        "O[2],VERA2 Bitmap Layer,Off,On;", // status[2] master-enable: SDRAM 640x480 4/8bpp bitmap ($9F60)
+        "O[5],VERA2 Bitmap Layer,Off,On;", // status[5] master-enable: SDRAM 640x480 4/8bpp bitmap ($9F60). Moved off O[2] -- that's the serial card's MiSTer UART selector.
         "O[4],Cart mount,RAM,Typed;", // status[4]: how "Mount Cart" (SC2) reads the image -- 0=RAM (raw all-RAM image, every bank 32-255 writable, persistent dirty-sector save-back), 1=Typed (parse the X16 .crt header for per-bank ROM/RAM/NVRAM, volatile)
         "O[3],Cart Banks 32+,By Cart,All RAM;", // status[3]: 0=By Cart (per-bank ROM/RAM from the mount's mask; no cart = ROM), 1=All RAM (force every cart bank 32-255 writable regardless, no cart needed)
         "-;",
@@ -550,12 +551,9 @@ module emu
     wire via1_cs   = dec_valid & (cpu_a[15:4]  == 12'h9F0);          // $9F00-$9F0F
     wire via2_cs   = dec_valid & (cpu_a[15:4]  == 12'h9F1);          // $9F10-$9F1F
     // TexElec's dual-UART serial/network card defaults to IO7-Low and exposes
-    // two 8-byte UART windows at $9FE0 and $9FE8. MiSTer only gives us one
-    // host UART, so alias both windows onto the same underlying UART block for
-    // ROMTERM compatibility.
-    wire serial0_cs = dec_valid &
-                      ((cpu_a[15:3] == 13'h13FC) ||                 // $9FE0-$9FE7
-                       (cpu_a[15:3] == 13'h13FD));                  // $9FE8-$9FEF
+    // two independent 8-byte UART windows at $9FE0 and $9FE8.
+    wire serial0_cs = dec_valid & (cpu_a[15:3] == 13'h13FC);       // $9FE0-$9FE7
+    wire serial1_cs = dec_valid & (cpu_a[15:3] == 13'h13FD);       // $9FE8-$9FEF
     wire bmp_cs    = dec_valid & (cpu_a[15:4]  == 12'h9F6);          // $9F60-$9F6F bitmap
     wire hi_ram_cs = dec_valid & (cpu_a[15:13] == 3'b101);           // $A000-$BFFF
     wire lowram_cs = dec_valid & ~(cpu_a[15:14] == 2'b11)
@@ -760,7 +758,7 @@ module emu
     // to SDRAM -- the cart space is RAM-semantics (software decides whether
     // a bank holds "ROM" images or data).
     // ---- bitmap layer interconnect (driven by u_bmp_regs / u_bmp_engine below) ----
-    wire        bmp_master_en = status[2];
+    wire        bmp_master_en = status[5];   // O[5] (O[2] is the serial UART selector)
     wire        bmp_sel = bmp_cs & bmp_master_en;   // $9F6x selected AND OSD-enabled
                                                     // (OSD off -> device inert = stock)
     wire  [7:0] bmp_do;
@@ -1419,34 +1417,92 @@ module emu
     // Serial/network card emulation at $9FE0-$9FEF
     //
     // ROMTERM expects the X16 serial/network card default at IO7-Low with
-    // valid UARTs at both $9FE0 and $9FE8. Alias both onto the same MiSTer
-    // host UART so the modem/TCP bridge is reachable regardless of which
-    // detected port ROMTERM selects.
+    // two distinct UARTs at $9FE0 and $9FE8. MiSTer only exposes one host
+    // UART, so status[2] maps it to one guest UART at a time. This mirrors the
+    // card's separate network ($9FE0) and physical serial ($9FE8) connectors
+    // without trying to infer ROMTERM's selected port from register traffic.
+    // Feeding RX to both banks duplicates replies into the companion FIFO.
+    // Changing the OSD mapping resets both banks to discard stale data. The
+    // physical card does not cross-connect DTR between UARTs and has no RI
+    // input. ROMTERM expects the companion RI bit to stay low while probing
+    // DTR; cross-connecting it rejects the card.
     // ========================================================================
     wire [7:0] serial0_data;
+    wire [7:0] serial1_data;
+    wire serial0_txd, serial0_rts, serial0_dtr;
+    wire serial1_txd, serial1_rts, serial1_dtr;
+    reg [1:0] serial_port_sync = 2'b00;
+    reg serial_uart_sel = 1'b0;
+    reg [1:0] serial_reset_hold = 2'b00;
+    wire serial_reset_n = cpu_reset_n & (serial_reset_hold == 2'b00);
+    wire serial0_rxd = serial_uart_sel ? 1'b1 : UART_RXD;
+    wire serial1_rxd = serial_uart_sel ? UART_RXD : 1'b1;
+
+    always @(posedge cpu_clk or negedge cpu_reset_n) begin
+        if (!cpu_reset_n) begin
+            serial_port_sync <= 2'b00;
+            serial_uart_sel <= 1'b0;
+            serial_reset_hold <= 2'b00;
+        end
+        else begin
+            serial_port_sync <= {serial_port_sync[0], status[2]};
+            if (serial_port_sync[1] != serial_uart_sel) begin
+                serial_uart_sel <= serial_port_sync[1];
+                serial_reset_hold <= 2'b11;
+            end else if (serial_reset_hold != 2'b00) begin
+                serial_reset_hold <= serial_reset_hold - 2'b01;
+            end
+        end
+    end
 
     x16_serial_card #(
         .CLK_HZ         (8_000_000),
         .DEFAULT_DIVISOR(16'd8)
     ) u_serial0 (
         .clk      (cpu_clk),
-        .reset_n  (cpu_reset_n),
+        .reset_n  (serial_reset_n),
         .cs       (serial0_cs),
         .rwn      (cpu_rwn),
         .enable   (cpu_rdy),
         .addr     (cpu_a[2:0]),
         .di       (cpu_do),
         .do_o     (serial0_data),
-        .uart_rxd (UART_RXD),
+        .uart_rxd (serial0_rxd),
         .uart_cts (UART_CTS),
         .uart_dsr (UART_DSR),
-        .uart_txd (UART_TXD),
-        .uart_rts (UART_RTS),
-        .uart_dtr (UART_DTR)
+        .uart_ri  (1'b0),
+        .uart_txd (serial0_txd),
+        .uart_rts (serial0_rts),
+        .uart_dtr (serial0_dtr)
     );
 
+    x16_serial_card #(
+        .CLK_HZ         (8_000_000),
+        .DEFAULT_DIVISOR(16'd8)
+    ) u_serial1 (
+        .clk      (cpu_clk),
+        .reset_n  (serial_reset_n),
+        .cs       (serial1_cs),
+        .rwn      (cpu_rwn),
+        .enable   (cpu_rdy),
+        .addr     (cpu_a[2:0]),
+        .di       (cpu_do),
+        .do_o     (serial1_data),
+        .uart_rxd (serial1_rxd),
+        .uart_cts (UART_CTS),
+        .uart_dsr (UART_DSR),
+        .uart_ri  (1'b0),
+        .uart_txd (serial1_txd),
+        .uart_rts (serial1_rts),
+        .uart_dtr (serial1_dtr)
+    );
+
+    assign UART_TXD = serial_uart_sel ? serial1_txd : serial0_txd;
+    assign UART_RTS = serial_uart_sel ? serial1_rts : serial0_rts;
+    assign UART_DTR = serial_uart_sel ? serial1_dtr : serial0_dtr;
+
     // ========================================================================
-    // SDRAM-backed bitmap layer ($9F60-$9F6F).  OSD master-enable = status[2].
+    // SDRAM-backed bitmap layer ($9F60-$9F6F).  OSD master-enable = status[5].
     // Register block (cpu_clk) + scanout engine (pix_clk fill in sdram_clk).
     // Composited over VERA by the VGA mux below; VERA is untouched.
     // ========================================================================
@@ -1591,6 +1647,7 @@ module emu
                     via1_cs   ? via1_data    :
                     via2_cs   ? via2_data    :
                     serial0_cs ? serial0_data :
+                    serial1_cs ? serial1_data :
                     bmp_fb_rd  ? sdram_rd     :   // $9F65 read = framebuffer byte (SDRAM)
                     bmp_sel    ? bmp_do       :   // $9F60-$9F6F bitmap regs (OSD-gated)
                     lowram_cs ? lowram_data  :

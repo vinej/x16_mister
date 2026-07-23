@@ -216,7 +216,7 @@ case "${1:-both}" in
     # the KERNAL r49 joystick_scan protocol, ps2_to_smc_bridge key+mouse.
     vlog -quiet -sv ../rtl/x16_periph.sv ../rtl/ps2_to_smc_bridge.sv \
          ../rtl/rtc_x16.sv ../vera/fpga/source/audio/dacif.v tb_periph.v
-    vsim -c -do "run -all; quit -f" tb_periph 2>&1 | grep -E "I2S|PAD|MOUS|TPM|RTC|TBC|Error|Fatal"
+    vsim -c -do "run -all; quit -f" tb_periph 2>&1 | grep -E "I2S|PAD|MOUS|KEYQ|TPM|RTC|TBC|Error|Fatal"
     exit 0 ;;
   cart)
     # Cart RAM save-back (2026-07-07): SC2 image -> restore via loader port
